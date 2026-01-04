@@ -26,7 +26,21 @@ class SecretsFilter:
     sensitive values before they're persisted or transmitted.
     """
 
-    def __init__(self, vault_path: str = None, vault_password: str = None, secrets_json: str = None):
+    # Values that should never be redacted even if they appear in the vault.
+    # These are typically database names, usernames, or other non-sensitive
+    # configuration values that happen to be stored alongside actual secrets.
+    DEFAULT_EXEMPTIONS = {
+        'pickipedia',
+        'mediawiki',
+        'postgres',
+        'postgresql',
+        'mysql',
+        'localhost',
+        'root',
+    }
+
+    def __init__(self, vault_path: str = None, vault_password: str = None,
+                 secrets_json: str = None, exemptions: List[str] = None):
         """
         Initialize the secrets filter.
 
@@ -34,9 +48,15 @@ class SecretsFilter:
             vault_path: Path to encrypted Ansible vault file
             vault_password: Password to decrypt vault (reads from env if not provided)
             secrets_json: JSON-encoded list of secrets (alternative to vault)
+            exemptions: Additional values to exempt from redaction
         """
         self.secrets: List[str] = []
         self.redaction_text = "[REDACTED:VAULT_SECRET]"
+
+        # Build exemption set from defaults plus any custom exemptions
+        self.exemptions = set(self.DEFAULT_EXEMPTIONS)
+        if exemptions:
+            self.exemptions.update(exemptions)
 
         # First try loading from JSON (preferred - no vault password needed at runtime)
         if secrets_json:
@@ -46,12 +66,20 @@ class SecretsFilter:
 
         logger.info(f"SecretsFilter initialized with {len(self.secrets)} secret values to scrub")
 
+    def _is_exempt(self, value: str) -> bool:
+        """Check if a value should be exempt from redaction."""
+        return value.lower() in {e.lower() for e in self.exemptions}
+
     def _load_from_json(self, secrets_json: str):
         """Load secrets from a JSON-encoded list."""
         try:
             secrets_list = json.loads(secrets_json)
             if isinstance(secrets_list, list):
-                self.secrets = [s for s in secrets_list if isinstance(s, str) and s]
+                all_secrets = [s for s in secrets_list if isinstance(s, str) and s]
+                self.secrets = [s for s in all_secrets if not self._is_exempt(s)]
+                exempted_count = len(all_secrets) - len(self.secrets)
+                if exempted_count:
+                    logger.info(f"Exempted {exempted_count} non-sensitive values from redaction")
                 logger.info(f"Loaded {len(self.secrets)} secrets from JSON")
             else:
                 logger.warning("SCRUB_SECRETS is not a JSON list")
@@ -88,13 +116,19 @@ class SecretsFilter:
             # Parse decrypted YAML
             vault_data = yaml.safe_load(result.stdout)
 
-            # Extract all vault_* variable values
+            # Extract all vault_* variable values, skipping exempted ones
+            exempted_count = 0
             for key, value in vault_data.items():
                 if key.startswith('vault_') and isinstance(value, str) and value:
-                    # Add the secret value
-                    self.secrets.append(value)
-                    logger.debug(f"Loaded secret from vault variable: {key}")
+                    if self._is_exempt(value):
+                        exempted_count += 1
+                        logger.debug(f"Exempted non-sensitive vault variable: {key}")
+                    else:
+                        self.secrets.append(value)
+                        logger.debug(f"Loaded secret from vault variable: {key}")
 
+            if exempted_count:
+                logger.info(f"Exempted {exempted_count} non-sensitive values from redaction")
             logger.info(f"Loaded {len(self.secrets)} secrets from vault")
 
         except subprocess.CalledProcessError as e:
@@ -166,10 +200,24 @@ class SecretsFilter:
         Manually add a secret value to scrub.
 
         Useful for runtime-discovered secrets or environment variables.
+        Respects exemption list - exempt values won't be added.
         """
-        if secret and secret not in self.secrets:
+        if secret and secret not in self.secrets and not self._is_exempt(secret):
             self.secrets.append(secret)
             logger.debug(f"Added secret to filter (length: {len(secret)})")
+
+    def add_exemption(self, value: str):
+        """
+        Add a value to the exemption list.
+
+        Exempted values will not be redacted even if they appear in the vault.
+        Also removes the value from secrets if it was already loaded.
+        """
+        if value:
+            self.exemptions.add(value.lower())
+            # Remove from secrets if already present
+            self.secrets = [s for s in self.secrets if s.lower() != value.lower()]
+            logger.debug(f"Added exemption: {value}")
 
     def add_env_secrets(self, *env_var_names: str):
         """
