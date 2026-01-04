@@ -33,6 +33,24 @@ app = FastAPI(
 SECRETS: List[str] = []
 REDACTION_TEXT = "[REDACTED]"
 
+# Values that should never be redacted even if they appear in the secrets list.
+# These are typically database names, usernames, or other non-sensitive
+# configuration values that happen to be stored alongside actual secrets.
+DEFAULT_EXEMPTIONS = {
+    'pickipedia',
+    'mediawiki',
+    'postgres',
+    'postgresql',
+    'mysql',
+    'localhost',
+    'root',
+}
+
+
+def is_exempt(value: str) -> bool:
+    """Check if a value should be exempt from redaction."""
+    return value.lower() in {e.lower() for e in DEFAULT_EXEMPTIONS}
+
 
 def load_secrets():
     """Load secrets from JSON file."""
@@ -48,8 +66,12 @@ def load_secrets():
             data = json.load(f)
 
         if isinstance(data, list):
-            # Filter to non-empty strings with reasonable length
-            SECRETS = [s for s in data if isinstance(s, str) and len(s) > 4]
+            # Filter to non-empty strings with reasonable length, excluding exemptions
+            all_secrets = [s for s in data if isinstance(s, str) and len(s) > 4]
+            SECRETS = [s for s in all_secrets if not is_exempt(s)]
+            exempted_count = len(all_secrets) - len(SECRETS)
+            if exempted_count:
+                logger.info(f"Exempted {exempted_count} non-sensitive values from redaction")
             logger.info(f"Loaded {len(SECRETS)} secrets")
         else:
             logger.warning("Secrets file is not a JSON list")
