@@ -9,13 +9,25 @@ Each tool handler:
 
 import mcp.types as types
 from asgiref.sync import sync_to_async
+from django.db import close_old_connections
 from conversations.services import MemoryService, BootstrapService
+
+
+def with_fresh_connection(func):
+    """Wrapper to ensure fresh database connection for each call"""
+    def wrapper(*args, **kwargs):
+        close_old_connections()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            close_old_connections()
+    return wrapper
 
 
 async def handle_bootstrap_memory():
     """Complete memory bootstrap for cold starts"""
-    # Call service
-    bootstrap_data = await sync_to_async(BootstrapService.bootstrap_memory)()
+    # Call service with fresh connection
+    bootstrap_data = await sync_to_async(with_fresh_connection(BootstrapService.bootstrap_memory))()
 
     # Format as text
     result_text = BootstrapService.format_bootstrap_text(bootstrap_data)
@@ -25,7 +37,7 @@ async def handle_bootstrap_memory():
 
 async def handle_get_latest_continuation():
     """Get most recent continuation message"""
-    continuation = await sync_to_async(MemoryService.get_latest_continuation)()
+    continuation = await sync_to_async(with_fresh_connection(MemoryService.get_latest_continuation))()
 
     if not continuation:
         return [types.TextContent(type="text", text="No continuation messages found")]
@@ -40,7 +52,7 @@ async def handle_get_message_by_id(arguments):
     if not message_id:
         return [types.TextContent(type="text", text="Error: message_id is required")]
 
-    message = await sync_to_async(MemoryService.get_message_by_id)(message_id)
+    message = await sync_to_async(with_fresh_connection(lambda: MemoryService.get_message_by_id(message_id)))()
 
     if not message:
         return [types.TextContent(type="text", text=f"Message '{message_id}' not found")]
@@ -64,11 +76,13 @@ async def handle_get_messages_before(arguments):
     reference_timestamp = arguments.get("reference_timestamp") if arguments else None
     limit = arguments.get("limit", 300) if arguments else 300
 
-    messages = await sync_to_async(MemoryService.get_messages_before)(
-        reference_id=reference_id,
-        reference_timestamp=reference_timestamp,
-        limit=limit
-    )
+    messages = await sync_to_async(with_fresh_connection(
+        lambda: MemoryService.get_messages_before(
+            reference_id=reference_id,
+            reference_timestamp=reference_timestamp,
+            limit=limit
+        )
+    ))()
 
     # Format results
     lines = [f"Retrieved {len(messages)} messages:\n"]
@@ -83,7 +97,7 @@ async def handle_get_era_summary(arguments):
     """Get messages from Era 1"""
     era_name = arguments.get("era_name", "Compacting Meta-Conversation (Era 1)") if arguments else "Compacting Meta-Conversation (Era 1)"
 
-    era_data = await sync_to_async(MemoryService.get_era_summary)(era_name)
+    era_data = await sync_to_async(with_fresh_connection(lambda: MemoryService.get_era_summary(era_name)))()
 
     if not era_data:
         return [types.TextContent(type="text", text=f"Era '{era_name}' not found")]
@@ -102,7 +116,7 @@ async def handle_get_context_heap(arguments):
     """Get all messages from a context heap"""
     heap_id = arguments.get("heap_id")
 
-    heap_data = await sync_to_async(MemoryService.get_context_heap)(heap_id)
+    heap_data = await sync_to_async(with_fresh_connection(lambda: MemoryService.get_context_heap(heap_id)))()
 
     if not heap_data:
         return [types.TextContent(type="text", text=f"Context heap '{heap_id}' not found")]
@@ -122,7 +136,7 @@ async def handle_search_messages(arguments):
     query = arguments.get("query")
     limit = arguments.get("limit", 50) if arguments else 50
 
-    messages = await sync_to_async(MemoryService.search_messages)(query, limit)
+    messages = await sync_to_async(with_fresh_connection(lambda: MemoryService.search_messages(query, limit)))()
 
     lines = [f"Search results for '{query}' ({len(messages)} messages):\n"]
     for msg in messages[:20]:
@@ -136,7 +150,7 @@ async def handle_get_recent_work(arguments):
     """Get recent messages"""
     limit = arguments.get("limit", 50) if arguments else 50
 
-    messages = await sync_to_async(MemoryService.get_recent_work)(limit)
+    messages = await sync_to_async(with_fresh_connection(lambda: MemoryService.get_recent_work(limit)))()
 
     lines = [f"Most recent {len(messages)} messages:\n"]
     for msg in messages:
@@ -151,10 +165,12 @@ async def handle_random_messages(arguments):
     count = arguments.get("count", 4) if arguments else 4
     context_messages = arguments.get("context_messages", 4) if arguments else 4
 
-    results = await sync_to_async(MemoryService.get_random_messages_with_context)(
-        count=count,
-        context_messages=context_messages
-    )
+    results = await sync_to_async(with_fresh_connection(
+        lambda: MemoryService.get_random_messages_with_context(
+            count=count,
+            context_messages=context_messages
+        )
+    ))()
 
     if not results:
         return [types.TextContent(type="text", text="No messages in database")]
