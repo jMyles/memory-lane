@@ -4,6 +4,13 @@ watchdog==6.0.0
 constant-sorrow==0.1.0a9
 gunicorn==23.0.0
 python-dotenv==1.0.0
-mcp>=1.0.0
+# Held below 2.0 on purpose. The 2.0 rewrite drops the decorator API on the
+# low-level Server — no more @server.list_tools() / @server.call_tool(), just
+# add_request_handler() — so conversations/mcp/server.py does not run on it.
+# An open range here is what took the MCP server down: a routine image rebuild
+# picked up 2.0 and it crash-looped for days on
+#   AttributeError: 'Server' object has no attribute 'list_tools'
+# Porting to the 2.0 handler API is worth doing; until then this must stay <2.
+mcp>=1.29.0,<2.0.0
 debugpy>=1.8.0
 requests>=2.31.0
