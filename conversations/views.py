@@ -147,12 +147,22 @@ def messages_since(request, message_id):
 
 
 def heap_metadata(request):
-    """Return just era and heap metadata without messages (for lazy loading)."""
-    from .models import ContextHeap, Era, Note, CompactingAction
-    from django.contrib.contenttypes.models import ContentType
-    from django.db.models import Min
+    """Return just era and heap metadata without messages (for lazy loading).
 
-    eras = Era.objects.prefetch_related('context_heaps').order_by('created_at')
+    Every per-heap fact is gathered in a fixed number of queries per era rather
+    than one query per heap.  Before this, each heap cost six queries (notes,
+    compacting action, first message, message count, and two blockheight
+    aggregates); with ~12,900 heaps in a single era that was ~78,000 round
+    trips, and the child-heap search was O(heaps^2) on top.  Gunicorn killed
+    the worker at 30s and the browser got an HTML error page to JSON.parse().
+    """
+    from .models import ContextHeap, Era, Note, CompactingAction, Message
+    from django.contrib.contenttypes.models import ContentType
+    from django.db.models import Min, Max, Count
+    from collections import defaultdict
+    from datetime import datetime
+
+    eras = Era.objects.order_by('created_at')
 
     data = {
         'eras': [],
@@ -163,13 +173,26 @@ def heap_metadata(request):
     heap_ct = ContentType.objects.get(app_label='conversations', model='contextheap')
     era_ct = ContentType.objects.get(app_label='conversations', model='era')
 
-    for era in eras:
-        # Get notes for this era
-        era_notes = Note.objects.filter(
-            content_type=era_ct,
-            object_id=era.id
-        ).order_by('created_at')
+    # All era notes in one query, grouped by era id.
+    era_notes_by_id = defaultdict(list)
+    for note in Note.objects.filter(content_type=era_ct).select_related('from_entity').order_by('created_at'):
+        era_notes_by_id[str(note.object_id)].append(note)
 
+    # All heap notes in one query, grouped by heap id.
+    heap_notes_by_id = defaultdict(list)
+    for note in Note.objects.filter(content_type=heap_ct).select_related('from_entity').order_by('created_at'):
+        heap_notes_by_id[str(note.object_id)].append(note)
+
+    def serialize_note(note):
+        return {
+            'id': str(note.id),
+            'from_entity': note.from_entity.name,
+            'content': note.content,
+            'eth_blockheight': note.eth_blockheight,
+            'created_at': note.created_at.isoformat()
+        }
+
+    for era in eras:
         era_data = {
             'id': str(era.id),
             'name': era.name,
@@ -177,20 +200,38 @@ def heap_metadata(request):
             'earliest_blockheight': era.earliest_blockheight(),
             'latest_blockheight': era.latest_blockheight(),
             'context_heaps': [],
-            'notes': [{
-                'id': str(note.id),
-                'from_entity': note.from_entity.name,
-                'content': note.content,
-                'eth_blockheight': note.eth_blockheight,
-                'created_at': note.created_at.isoformat()
-            } for note in era_notes]
+            'notes': [serialize_note(n) for n in era_notes_by_id.get(str(era.id), [])]
         }
 
-        # Get all heaps and annotate with first message info for sorting
-        all_heaps = list(era.context_heaps.annotate(
-            first_msg_timestamp=Min('messages__timestamp'),
-            first_msg_created=Min('messages__created_at')
-        ).all())
+        # One query for every per-heap aggregate: message count, blockheight
+        # range, and the timestamps used for sorting.  All of these aggregate
+        # over the same `messages` join, so there is no fan-out.
+        all_heaps = list(
+            era.context_heaps
+               .select_related('compacting_action')
+               .annotate(
+                   msg_count=Count('messages'),
+                   earliest_bh=Min('messages__eth_blockheight'),
+                   latest_bh=Max('messages__eth_blockheight'),
+                   first_msg_timestamp=Min('messages__timestamp'),
+                   first_msg_created=Min('messages__created_at'),
+               )
+        )
+
+        if not all_heaps:
+            data['eras'].append(era_data)
+            continue
+
+        heap_ids = [h.id for h in all_heaps]
+
+        # One query for the first message of every heap (Postgres DISTINCT ON).
+        first_msg_by_heap = {}
+        for msg in (Message.objects
+                    .filter(context_heap_id__in=heap_ids)
+                    .order_by('context_heap_id', 'message_number')
+                    .distinct('context_heap_id')
+                    .only('id', 'timestamp', 'context_heap_id')):
+            first_msg_by_heap[msg.context_heap_id] = msg
 
         # Sort by first message timestamp, falling back to created_at
         def heap_sort_key(h):
@@ -203,18 +244,23 @@ def heap_metadata(request):
 
         all_heaps.sort(key=heap_sort_key)
 
+        # A split heap's parent is the heap its first message belongs to.  The
+        # first-message map above already answers that, so the parent lookup is
+        # a dict read rather than a scan over every heap.
+        children_by_parent = defaultdict(list)
+        for heap in all_heaps:
+            if heap.type != 'split_point':
+                continue
+            first_msg = first_msg_by_heap.get(heap.id)
+            if first_msg and first_msg.context_heap_id != heap.id:
+                children_by_parent[first_msg.context_heap_id].append(heap)
+
         # Build metadata for each heap (without messages)
         def serialize_heap_metadata(heap):
-            # Get notes for this heap
-            heap_notes = Note.objects.filter(
-                content_type=heap_ct,
-                object_id=heap.id
-            ).order_by('created_at')
-
-            # Check for compacting action
+            # Check for compacting action (select_related above; no query here)
             compacting_action = None
-            if hasattr(heap, 'compacting_action') and heap.compacting_action:
-                ca = heap.compacting_action
+            ca = getattr(heap, 'compacting_action', None)
+            if ca:
                 # Get ending message ID from either FK or looking_for field
                 ending_msg_id = None
                 if ca.ending_message_id:
@@ -229,18 +275,14 @@ def heap_metadata(request):
                     'continuation_message_id': str(ca.continuation_message_id) if ca.continuation_message_id else None
                 }
 
-            # Get first message info
-            first_message = heap.messages.order_by('message_number').only('id', 'timestamp').first()
+            # First message info, from the map built above
+            first_message = first_msg_by_heap.get(heap.id)
             first_message_timestamp = None
             first_message_id = None
             if first_message:
                 first_message_id = str(first_message.id)
                 if first_message.timestamp:
-                    from datetime import datetime
                     first_message_timestamp = datetime.fromtimestamp(first_message.timestamp / 1000).isoformat()
-
-            # Get message count
-            message_count = heap.messages.count()
 
             heap_data = {
                 'id': str(heap.id),
@@ -248,27 +290,17 @@ def heap_metadata(request):
                 'type_display': heap.get_type_display(),
                 'first_message_id': first_message_id,
                 'first_message_timestamp': first_message_timestamp,
-                'message_count': message_count,
+                'message_count': heap.msg_count,
                 'created_at': heap.created_at.isoformat(),
-                'earliest_blockheight': heap.earliest_blockheight(),
-                'latest_blockheight': heap.latest_blockheight(),
-                'child_heaps': [],
+                'earliest_blockheight': heap.earliest_bh,
+                'latest_blockheight': heap.latest_bh,
+                'child_heaps': [
+                    serialize_heap_metadata(child)
+                    for child in children_by_parent.get(heap.id, [])
+                ],
                 'compacting_action': compacting_action,
-                'notes': [{
-                    'id': str(note.id),
-                    'from_entity': note.from_entity.name,
-                    'content': note.content,
-                    'eth_blockheight': note.eth_blockheight,
-                    'created_at': note.created_at.isoformat()
-                } for note in heap_notes]
+                'notes': [serialize_note(n) for n in heap_notes_by_id.get(str(heap.id), [])]
             }
-
-            # Find child split heaps
-            for potential_child in all_heaps:
-                if potential_child.type == 'split_point':
-                    parent_heap = potential_child.parent_heap()
-                    if parent_heap and parent_heap.id == heap.id:
-                        heap_data['child_heaps'].append(serialize_heap_metadata(potential_child))
 
             return heap_data
 
@@ -282,13 +314,19 @@ def heap_metadata(request):
     # Get orphaned compacting actions (not linked to any context heap)
     from .models import RawImportedContent
     ca_ct = ContentType.objects.get(app_label='conversations', model='compactingaction')
-    orphaned = CompactingAction.objects.filter(context_heap__isnull=True).order_by('created_at')
-    for compact in orphaned:
-        # Get raw imported content if it exists
-        raw_content = RawImportedContent.objects.filter(
+    orphaned = list(CompactingAction.objects.filter(context_heap__isnull=True).order_by('created_at'))
+
+    # Raw imported content for all orphans in one query
+    raw_by_object_id = {
+        str(rc.object_id): rc
+        for rc in RawImportedContent.objects.filter(
             content_type=ca_ct,
-            object_id=compact.id
-        ).first()
+            object_id__in=[c.id for c in orphaned]
+        )
+    } if orphaned else {}
+
+    for compact in orphaned:
+        raw_content = raw_by_object_id.get(str(compact.id))
 
         # Get ending message ID
         ending_msg_id = None
