@@ -263,6 +263,69 @@ class ContextHeap(models.Model):
 
 
 # ============================================================================
+# Motion
+# ============================================================================
+
+class Motion(models.Model):
+    """
+    A Motion is what a conversation is *about*.
+
+    It is deliberately orthogonal to the two groupings that already exist:
+
+      Era         a phase of the relationship
+      ContextHeap where a context window filled up and compacting occurred
+      Motion      the subject a conversation belongs to
+
+    A message can sit in all three. Heaps and eras are artifacts of how the
+    machinery ran; a Motion is chosen by people, outlives any one session,
+    and can span directories, repositories and backends.
+
+    The slug is the stable key. It is what a chat room, a wiki page, or any
+    other view names when it wants to render this conversation -- the view is
+    replaceable, the Motion is not.
+
+    Intentionally thin. The first real interface built on top of this should
+    be allowed to argue with the shape before more is added.
+    """
+
+    slug = models.SlugField(max_length=100, primary_key=True)
+    title = models.CharField(max_length=200, blank=True)
+    description = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    eth_blockheight = models.BigIntegerField(
+        null=True, blank=True,
+        help_text='Block height at which this Motion was opened'
+    )
+
+    class Meta:
+        db_table = 'motions'
+        ordering = ['slug']
+
+    def earliest_blockheight(self):
+        """Returns the earliest blockheight from messages in this Motion."""
+        result = self.messages.filter(eth_blockheight__isnull=False).aggregate(
+            earliest=models.Min('eth_blockheight')
+        )
+        return result['earliest']
+
+    def latest_blockheight(self):
+        """Returns the latest blockheight from messages in this Motion."""
+        result = self.messages.filter(eth_blockheight__isnull=False).aggregate(
+            latest=models.Max('eth_blockheight')
+        )
+        return result['latest']
+
+    def thinking_entities(self):
+        """Who has spoken in this Motion -- humans and agents, not tools."""
+        return ThinkingEntity.objects.filter(
+            sent_messages__motion=self
+        ).distinct()
+
+    def __str__(self):
+        return self.title or self.slug
+
+
+# ============================================================================
 # Message Models (Polymorphic)
 # ============================================================================
 
@@ -284,6 +347,13 @@ class Message(models.Model):
 
     # Context - all messages belong to a heap
     context_heap = models.ForeignKey('ContextHeap', models.CASCADE, related_name='messages', null=True, blank=True)
+
+    # Subject - what this message is about, independent of where the context
+    # window happened to end. Nullable: most of the corpus predates Motions,
+    # and SET_NULL so that retiring a Motion never destroys messages.
+    motion = models.ForeignKey(
+        'Motion', models.SET_NULL, related_name='messages', null=True, blank=True
+    )
 
     # Threading - optional parent for message chains
     parent = models.ForeignKey('self', models.CASCADE, related_name='children', null=True, blank=True)
@@ -330,6 +400,7 @@ class Message(models.Model):
         indexes = [
             models.Index(fields=['session_id', 'timestamp']),
             models.Index(fields=['sender']),
+            models.Index(fields=['motion', 'created_at']),
         ]
         unique_together = [['context_heap', 'message_number']]
 
