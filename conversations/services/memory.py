@@ -6,8 +6,37 @@ Called via sync_to_async from MCP tools.
 """
 
 from conversations.models import Message, Era, ContextHeap
-from django.db.models import Q
+from django.db.models import Count, Max, Min, Q
+import json
 import random
+
+
+# Opening prompts that say nothing about what a thread is *about*. Skipped
+# when picking a title hint, so a background session started with
+# `claude --bg 'reawaken magent'` is titled by its first real request.
+_NON_TOPICAL_OPENERS = ('reawaken magent', 'reawaken')
+
+
+def _text_of(content):
+    """Best-effort plain text from a Message.content value.
+
+    Content arrives in several shapes depending on importer and era: a plain
+    string, a JSON-encoded string of blocks, a list of blocks, or a dict.
+    Only human-readable text blocks are kept; tool calls and results are not.
+    """
+    if isinstance(content, str):
+        stripped = content.strip()
+        if stripped[:1] in ('[', '{'):
+            try:
+                return _text_of(json.loads(stripped))
+            except ValueError:
+                pass
+        return content
+    if isinstance(content, dict):
+        return content.get('text', '') if content.get('type', 'text') == 'text' else ''
+    if isinstance(content, list):
+        return ' '.join(t for t in (_text_of(block) for block in content) if t)
+    return ''
 
 
 class MemoryService:
@@ -94,10 +123,80 @@ class MemoryService:
         return list(messages)
 
     @staticmethod
-    def get_recent_work(limit=50):
-        """Get most recent messages"""
-        messages = Message.objects.order_by('-created_at')[:limit]
-        return list(messages)
+    def get_recent_work(limit=50, session_id=None):
+        """Get most recent messages, optionally scoped to one thread"""
+        messages = Message.objects.all()
+        if session_id:
+            messages = messages.filter(session_id=session_id)
+        return list(messages.order_by('-created_at')[:limit])
+
+    @staticmethod
+    def list_threads(limit=20, since=None):
+        """Distinct threads, most recently active first.
+
+        Without this, recall is a flat chronological column: concurrent
+        threads interleave and read as one confused stream.
+
+        A thread here is a session_id. That is a runtime instance, not a
+        conversation -- one long session spans several context heaps, and a
+        resumed conversation gets a new session_id -- so this is the unit
+        available today, not the right one. The intended key is a motion ID
+        (see magenta#41). Keep callers keyed on the returned `thread_id` so
+        the grouping can change underneath them.
+        """
+        messages = Message.objects.exclude(session_id__isnull=True)
+        if since:
+            messages = messages.filter(created_at__gte=since)
+
+        rows = (
+            messages.values('session_id')
+            .annotate(
+                message_count=Count('id'),
+                first_at=Min('created_at'),
+                last_at=Max('created_at'),
+            )
+            .order_by('-last_at')[:limit]
+        )
+
+        threads = []
+        for row in rows:
+            in_thread = Message.objects.filter(session_id=row['session_id'])
+
+            # cwd and branch can change mid-session; report where it is now.
+            latest = in_thread.exclude(cwd__isnull=True).order_by('-created_at').first()
+
+            # Thinking entities only: tools and system components also send
+            # messages, but "who was in this thread" means humans and agents.
+            participants = sorted(set(
+                in_thread.filter(sender__thinkingentity__isnull=False)
+                .values_list('sender_id', flat=True)
+            ))
+
+            title_hint = ''
+            human_messages = in_thread.filter(
+                sender__thinkingentity__is_biological_human=True
+            ).order_by('created_at')
+            for msg in human_messages[:25]:
+                text = ' '.join(_text_of(msg.content).split())
+                if not text or text.startswith('<'):
+                    continue
+                if text.lower().rstrip('.!') in _NON_TOPICAL_OPENERS:
+                    continue
+                title_hint = text
+                break
+
+            threads.append({
+                'thread_id': str(row['session_id']),
+                'message_count': row['message_count'],
+                'first_at': row['first_at'],
+                'last_at': row['last_at'],
+                'cwd': latest.cwd if latest else None,
+                'git_branch': latest.git_branch if latest else None,
+                'participants': participants,
+                'title_hint': title_hint,
+            })
+
+        return threads
 
     @staticmethod
     def get_random_messages_with_context(count=4, context_messages=4):

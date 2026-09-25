@@ -149,10 +149,14 @@ async def handle_search_messages(arguments):
 async def handle_get_recent_work(arguments):
     """Get recent messages"""
     limit = arguments.get("limit", 50) if arguments else 50
+    session_id = arguments.get("thread_id") if arguments else None
 
-    messages = await sync_to_async(with_fresh_connection(lambda: MemoryService.get_recent_work(limit)))()
+    messages = await sync_to_async(with_fresh_connection(
+        lambda: MemoryService.get_recent_work(limit, session_id=session_id)
+    ))()
 
-    lines = [f"Most recent {len(messages)} messages:\n"]
+    scope = f" in thread {session_id}" if session_id else ""
+    lines = [f"Most recent {len(messages)} messages{scope}:\n"]
     for msg in messages:
         lines.append(f"[{msg.sender_id}] {msg.created_at.isoformat()}")
         lines.append(f"{str(msg.content)[:150]}...\n")
@@ -194,7 +198,37 @@ async def handle_random_messages(arguments):
 
 
 # Tool registry - maps tool names to handlers
+async def handle_list_threads(arguments):
+    """List distinct threads, most recently active first"""
+    limit = arguments.get("limit", 20) if arguments else 20
+    since = arguments.get("since") if arguments else None
+
+    threads = await sync_to_async(with_fresh_connection(
+        lambda: MemoryService.list_threads(limit=limit, since=since)
+    ))()
+
+    heading = f"{len(threads)} threads" + (f" active since {since}" if since else "")
+    lines = [f"{heading}, most recent first:\n"]
+    for i, t in enumerate(threads, 1):
+        lines.append(
+            f"[{i}] last {t['last_at'].isoformat()} · first {t['first_at'].isoformat()}"
+            f" · {t['message_count']} msgs"
+        )
+        if t['participants']:
+            lines.append(f"    with: {', '.join(t['participants'])}")
+        if t['cwd']:
+            branch = f"  (branch {t['git_branch']})" if t['git_branch'] else ""
+            lines.append(f"    cwd: {t['cwd']}{branch}")
+        if t['title_hint']:
+            lines.append(f"    \"{t['title_hint'][:140]}\"")
+        lines.append(f"    thread_id: {t['thread_id']}\n")
+
+    lines.append("Pass a thread_id to get_recent_work to read that thread alone.")
+    return [types.TextContent(type="text", text='\n'.join(lines))]
+
+
 TOOL_HANDLERS = {
+    "list_threads": handle_list_threads,
     "bootstrap_memory": handle_bootstrap_memory,
     "get_latest_continuation": handle_get_latest_continuation,
     "get_message_by_id": handle_get_message_by_id,

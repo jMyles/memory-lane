@@ -100,12 +100,24 @@ def create_mcp_server():
                 }
             ),
             types.Tool(
-                name="get_recent_work",
-                description="Get the most recent N messages to understand current work",
+                name="list_threads",
+                description="List distinct conversation threads, most recently active first, with message count, first/last activity, participants, working directory, and a title hint from the first substantive human message. Use this before get_recent_work to see what separate things were happening instead of one interleaved stream.",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "limit": {"type": "number", "description": "Number of messages (default 50)", "default": 50}
+                        "limit": {"type": "number", "description": "Maximum threads (default 20)", "default": 20},
+                        "since": {"type": "string", "description": "Only threads with activity at or after this ISO timestamp"}
+                    }
+                }
+            ),
+            types.Tool(
+                name="get_recent_work",
+                description="Get the most recent N messages to understand current work. Pass thread_id (from list_threads) to read one thread alone.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "number", "description": "Number of messages (default 50)", "default": 50},
+                        "thread_id": {"type": "string", "description": "Restrict to one thread, as returned by list_threads"}
                     }
                 }
             ),
