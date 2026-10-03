@@ -1,6 +1,6 @@
 """The app's icon, drawn here: a white speech bubble on magenta, as a PNG.
 
-Pure Python (zlib and struct), so installing pickipedia chat as an app needs
+Pure Python (zlib and struct), so installing magenta as an app needs
 no image files in the repo and no imaging library on the server. Edges are
 smoothed from signed distances. Everything sits inside the middle 80%, so a
 launcher that crops icons to a circle ("maskable") loses none of it.

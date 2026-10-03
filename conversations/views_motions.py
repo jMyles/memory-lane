@@ -17,7 +17,7 @@ from django.views.decorators.http import require_GET, require_POST
 from .models import Message, Motion, ThinkingEntity
 from .services import motion_auth
 from .services.motion_view import (
-    MACHINERY_SENDERS, activity, background_tasks, is_wrapper, known_names, mentions_in, motion_payload,
+    MACHINERY_SENDERS, how_payload, activity, background_tasks, is_wrapper, known_names, mentions_in, motion_payload,
     prose, render_html, step_detail, step_images, step_payload, timeline, turn_payload, turns, wiki_title, wikilinks_in,
 )
 
@@ -41,9 +41,14 @@ def motions_page(request, slug=None):
 
 @require_GET
 def api_motions(request):
-    """Every Motion, most recently active first."""
-    payloads = [motion_payload(m) for m in Motion.objects.all()]
-    payloads.sort(key=lambda p: p['last_at'] or '', reverse=True)
+    """Every Motion, most recently active first; archived ones flagged (the page lists them apart)."""
+    from .services import settings as knobs
+    archived = knobs.archived_slugs()
+    motions = list(Motion.objects.all())
+    payloads = [{**motion_payload(m), 'archived': m.slug in archived} for m in motions]
+    # A Mood nobody has spoken in yet ranks by when it was started: a new one first.
+    started = {m.slug: m.created_at.isoformat() for m in motions}
+    payloads.sort(key=lambda p: p['last_at'] or started[p['slug']], reverse=True)
     people = ThinkingEntity.objects.order_by('name')
     return JsonResponse({'motions': payloads, 'people': [
         {'name': p.name, 'is_human': p.is_biological_human} for p in people]})
@@ -64,23 +69,30 @@ def api_motion_turns(request, slug):
         after = _message_or_none(request.GET['after'])
     if request.GET.get('before'):
         before = _message_or_none(request.GET['before'])
+    # ?from=<id>: that message and everything since -- what a runner reads
+    # when a post links a message to read from.
+    start = _message_or_none(request.GET['from']) if request.GET.get('from') else None
+    if request.GET.get('from') and (start is None or start.motion_id != motion.slug):
+        # Never this Mood read from another's moment: the message must be here.
+        return JsonResponse({'error': 'no such message in this Mood',
+                             'motion': start.motion_id if start else None}, status=404)
     # A first load, or a page back, is the newest PAGE items; a poll is
     # everything since.
-    limit = None if after is not None else PAGE
+    limit = None if after is not None or start is not None else PAGE
     if request.GET.get('limit', '').isdigit():  # e.g. the runner wanting recent context only
         limit = max(1, min(int(request.GET['limit']), PAGE))
 
     names = known_names()
     turns_out, step_msgs, quiet_out, thoughts_out, compactions_out, events_out = [], [], [], [], [], []
-    for kind, msg, text in timeline(motion, after=after, before=before, limit=limit):
+    for kind, msg, text in timeline(motion, after=after, before=before, limit=limit, start=start):
         if kind == 'turn':
             turns_out.append(turn_payload(msg, text, names))
         elif kind == 'thought':
-            thoughts_out.append({'id': str(msg.id), 'sender': msg.sender_id,
+            thoughts_out.append({**how_payload(msg), 'id': str(msg.id), 'sender': msg.sender_id,
                                  'created_at': msg.created_at.isoformat(), 'text': text})
         elif kind == 'event':
             events_out.append({'id': str(msg.id), 'created_at': msg.created_at.isoformat(),
-                               **{k: text.get(k) for k in ('type', 'server', 'state', 'commit', 'by', 'note', 'took')}})
+                               **{k: text.get(k) for k in ('type', 'server', 'state', 'commit', 'by', 'note', 'took', 'agent')}})
         elif kind == 'compaction':
             compactions_out.append({'id': str(msg.id), 'session_id': str(msg.session_id or ''),
                                     'created_at': msg.created_at.isoformat(), 'html': render_html(text)})
@@ -135,6 +147,7 @@ def agents_in(motion):
         resolved = knobs.resolve(motion.slug, name)
         out[name] = {'listening': resolved['listening'], 'model': resolved['model'],
                      'effort': resolved['mention_effort'], 'ultracode': bool(resolved['ultracode']),
+                     'reads': resolved['catch_up_tokens'],
                      'context': context_in(motion, name)}
     return out
 
@@ -187,6 +200,7 @@ def api_pulse(request):
     humans = set(ThinkingEntity.objects.filter(is_biological_human=True).values_list('name', flat=True))
     agent = request.GET.get('agent', 'magent')
     rows = list(Setting.objects.exclude(key__in=knobs.MODERATION_KEYS))
+    archived = knobs.archived_slugs()
     motions = []
     for motion in Motion.objects.all():
         said = motion.messages.filter(is_sidechain=False).exclude(sender_id__in=MACHINERY_SENDERS)
@@ -200,6 +214,8 @@ def api_pulse(request):
             'activity': activity(motion),
             # How this agent is to carry itself here (services/settings.py).
             'settings': knobs.resolve(motion.slug, agent, rows=rows),
+            # Out of the list: no unprompted looks there (mentions still answered).
+            'archived': motion.slug in archived,
         })
     return JsonResponse({
         'now': timezone.now().isoformat(),
@@ -583,8 +599,8 @@ def api_mentions(request, name):
 @require_GET
 def app_manifest(request):
     return JsonResponse({
-        'name': 'pickipedia chat',
-        'short_name': 'pickipedia chat',
+        'name': 'magenta',
+        'short_name': 'magenta',
         'description': 'Moods: where cryptograss talks, people and agents together.',
         'id': '/motions/',
         'start_url': '/motions/',
@@ -608,7 +624,7 @@ def app_icon(request, size):
     return response
 
 
-SERVICE_WORKER = """// pickipedia chat: here so the page can be installed as an app. It keeps
+SERVICE_WORKER = """// magenta: here so the page can be installed as an app. It keeps
 // nothing: every request goes to the network, as if it weren't here.
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
@@ -616,7 +632,7 @@ self.addEventListener('fetch', e => {
   if (e.request.mode === 'navigate') e.respondWith(fetch(e.request));
 });
 // A notification (a mention, an answer) opens its Mood at that message: in a
-// window already open on pickipedia chat if there is one, else a new one.
+// window already open on magenta if there is one, else a new one.
 self.addEventListener('notificationclick', e => {
   e.notification.close();
   const { slug, id } = e.notification.data || {};
@@ -653,3 +669,60 @@ def api_work(request):
             return JsonResponse({'items': [], 'error': f'could not ask the forge: {type(e).__name__}'})
         cache.set('work:open', items, 120)
     return JsonResponse({'items': items})
+
+
+# --- who's around in each Mood, and the chain's height -------------------------
+
+AROUND_BLOCKS = 100     # who spoke within this many blocks counts as around
+SECONDS_PER_BLOCK = 12  # since the merge, a slot every 12 s (a missed slot makes it a little more)
+
+
+@require_GET
+def api_motions_live(request):
+    """Each Mood's people of the moment: who has spoken in the last 100 blocks
+    (about 20 minutes), who's typing, which agent is working. Cached for
+    3 s: every open page asks every few seconds."""
+    from datetime import timedelta
+    from django.core.cache import cache
+    from django.utils import timezone
+
+    cached = cache.get('motions-live')
+    if cached is not None:
+        return JsonResponse(cached)
+    now = timezone.now()
+    names = set(ThinkingEntity.objects.values_list('name', flat=True))
+    since = now - timedelta(seconds=AROUND_BLOCKS * SECONDS_PER_BLOCK)
+    spoke = (Message.objects.filter(motion__isnull=False, is_sidechain=False, created_at__gte=since,
+                                    sender_id__in=names)
+             .values('motion_id', 'sender_id').annotate(last=Max('created_at')).order_by('-last'))
+    live = {}
+    for row in spoke:
+        live.setdefault(row['motion_id'], {'speakers': [], 'typing': [], 'busy': None})['speakers'].append(row['sender_id'])
+    for motion in Motion.objects.all():
+        entry = live.setdefault(motion.slug, {'speakers': [], 'typing': [], 'busy': None})
+        entry['typing'] = typing_in(motion.slug)
+        if motion.slug in {r['motion_id'] for r in spoke}:  # only a Mood with recent words can have work under way
+            act = activity(motion)
+            if act and act.get('doing') != 'held':
+                entry['busy'] = act['agent']
+    body = {'motions': live, 'blocks': AROUND_BLOCKS}
+    cache.set('motions-live', body, 3)
+    return JsonResponse(body)
+
+
+@require_GET
+def api_block(request):
+    """Ethereum mainnet's newest block -- height and time -- from a public
+    explorer, cached a minute; the page counts on from it, a block every
+    12 seconds."""
+    from django.core.cache import cache
+    block = cache.get('eth-head')
+    if block is None:
+        try:
+            import requests
+            head = requests.get('https://eth.blockscout.com/api/v2/main-page/blocks', timeout=5).json()[0]
+            block = {'height': int(head['height']), 'at': head['timestamp'], 'seconds': SECONDS_PER_BLOCK}
+        except Exception:
+            block = {'height': None}
+        cache.set('eth-head', block, 60 if block['height'] else 15)
+    return JsonResponse(block)

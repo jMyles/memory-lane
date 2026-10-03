@@ -134,3 +134,92 @@ class OpenWorkTest(TestCase):
             body = self.client.get('/api/work/').json()
         self.assertEqual(body['items'], [])
         self.assertIn('could not ask the forge', body['error'])
+
+
+class AroundTest(TestCase):
+    """Who's around in each Mood: who spoke in the last 100 blocks, and who's typing."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.justin = ThinkingEntity.objects.create(name='justin', is_biological_human=True)
+        cls.skyler = ThinkingEntity.objects.create(name='skyler', is_biological_human=True)
+        cls.magent = ThinkingEntity.objects.create(name='magent', is_biological_human=False)
+        cls.m26 = Motion.objects.create(slug='m26')
+        cls.dk = Motion.objects.create(slug='delivery-kid')
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.delete('motions-live')
+        cache.delete('typing:m26')
+
+    def test_recent_speakers_per_mood(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        old = Message.objects.create(id=uuid.uuid4(), sender=self.skyler, motion=self.dk, content='an hour ago')
+        Message.objects.filter(pk=old.pk).update(created_at=timezone.now() - timedelta(hours=1))
+        Message.objects.create(id=uuid.uuid4(), sender=self.justin, motion=self.m26, content='just now')
+        live = self.client.get('/api/motions/live/').json()['motions']
+        self.assertEqual(live['m26']['speakers'], ['justin'])
+        self.assertEqual(live['delivery-kid']['speakers'], [])  # an hour is more than 100 blocks
+
+    def test_the_block_height_comes_from_the_explorer_or_not_at_all(self):
+        from unittest import mock
+        from django.core.cache import cache
+        cache.delete('eth-head')
+        head = mock.Mock(json=lambda: [{'height': 26113794, 'timestamp': '2026-10-03T19:06:23Z'}])
+        with mock.patch('requests.get', return_value=head):
+            self.assertEqual(self.client.get('/api/block/').json()['height'], 26113794)
+        cache.delete('eth-head')
+        with mock.patch('requests.get', side_effect=OSError('down')):
+            self.assertIsNone(self.client.get('/api/block/').json()['height'])
+
+
+class MoodMemoryToolsTest(TestCase):
+    """The memory server reads Moods: list_moods, and read_mood from a message or a time."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.justin = ThinkingEntity.objects.create(name='justin', is_biological_human=True)
+        cls.magent = ThinkingEntity.objects.create(name='magent', is_biological_human=False)
+        cls.m26 = Motion.objects.create(slug='m26', title='Magenta Interface(s)', description='the chat itself')
+        cls.rows = []
+        for i in range(5):
+            cls.rows.append(Message.objects.create(id=uuid.uuid4(), sender=cls.justin if i % 2 == 0 else cls.magent,
+                                                   motion=cls.m26, content=f'line {i}',
+                                                   timestamp=int((time.time() + i) * 1000)))
+
+    def test_list_moods(self):
+        from conversations.mcp.tools import list_moods_text
+        text = list_moods_text()
+        self.assertIn('m26 -- Magenta Interface(s)', text)
+        self.assertIn('5 messages', text)
+
+    def test_read_a_mood_whole_or_from_a_message(self):
+        from conversations.mcp.tools import read_mood_text
+        whole = read_mood_text('m26')
+        self.assertIn('Mood: Magenta Interface(s) (m26)', whole)
+        self.assertLess(whole.index('line 0'), whole.index('line 4'))  # oldest first
+        self.assertIn(f'#m-{self.rows[2].id}', whole)
+        tail = read_mood_text('m26', start=str(self.rows[3].id))
+        self.assertNotIn('line 2', tail)
+        self.assertIn('line 3', tail)
+        self.assertIn("No Mood 'nowhere'", read_mood_text('nowhere'))
+
+
+class ReadFromTest(TestCase):
+    """?from= reads one Mood from one of its own messages, never another's."""
+
+    def test_from_a_message_in_this_mood_only(self):
+        justin = ThinkingEntity.objects.create(name='justin', is_biological_human=True)
+        a = Motion.objects.create(slug='a')
+        b = Motion.objects.create(slug='b')
+        first = Message.objects.create(id=uuid.uuid4(), sender=justin, motion=a, content='in a, first',
+                                       timestamp=int(time.time() * 1000))
+        Message.objects.create(id=uuid.uuid4(), sender=justin, motion=b, content='in b, meanwhile',
+                               timestamp=int(time.time() * 1000) + 1)
+        Message.objects.create(id=uuid.uuid4(), sender=justin, motion=a, content='in a, then',
+                               timestamp=int(time.time() * 1000) + 2)
+        texts = [t['text'] for t in self.client.get(f'/api/motions/a/turns/?from={first.id}').json()['turns']]
+        self.assertEqual(texts, ['in a, first', 'in a, then'])
+        wrong = self.client.get(f'/api/motions/b/turns/?from={first.id}')
+        self.assertEqual((wrong.status_code, wrong.json()['motion']), (404, 'a'))

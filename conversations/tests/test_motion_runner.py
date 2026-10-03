@@ -116,12 +116,15 @@ class StreamTest(TestCase):
                            'sessionId': self.session, 'timestamp': '2026-10-01T23:00:01.000Z',
                            'userType': 'external', 'isSidechain': False, 'cwd': '/home/magent/workspace',
                            'gitBranch': 'main', 'effort': 'high', 'perTurnEffort': 'xhigh',
-                           'message': reply['message'] | {'stop_reason': 'end_turn'}})
+                           'message': reply['message'] | {'stop_reason': 'end_turn',
+                                                          'usage': {'input_tokens': 3, 'output_tokens': 322}}})
+        self.assertEqual(Message.objects.get(id=reply['uuid']).output_tokens, 40)  # the stream's, mid-response
         import_lines([line], source='hunter-watcher', username='justin')
         self.assertEqual(Message.objects.count(), count)
         stored = Message.objects.get(id=reply['uuid'])
         self.assertEqual((stored.effort, stored.cwd, str(stored.parent_id)), ('xhigh', '/home/magent/workspace',
                                                                           result['uuid']))
+        self.assertEqual(stored.output_tokens, 322)  # the response's final count
 
     def test_what_streams_in_is_redacted_and_its_images_kept(self):
         s = self.session
@@ -139,6 +142,53 @@ class StreamTest(TestCase):
                        parent_tool_use_id='toolu_agent1')
         self.post([helper])
         self.assertTrue(Message.objects.get(id=helper['uuid']).is_sidechain)
+
+    def test_a_commands_output_is_shown_and_leaves_the_pie_alone(self):
+        # /context's answer is a "<synthetic>" message that read nothing.
+        Message.objects.create(id=uuid.uuid4(), sender_id='magent', motion=self.motion, session_id=str(uuid.uuid4()),
+                               content=[{'type': 'text', 'text': 'Before.'}], timestamp=1, input_tokens=3,
+                               cache_read_input_tokens=400_000, model_backend='claude-opus-5-5')
+        s = self.session
+        table = event('assistant', [{'type': 'text', 'text': '## Context Usage\n\n**Tokens:** 400k / 1m (40%)'}],
+                      session_id=s)
+        table['message'].update({'model': '<synthetic>', 'stop_reason': 'end_turn',
+                                 'usage': {'input_tokens': 0, 'output_tokens': 0}})
+        done = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': table['message']['content'][0]['text'],
+                'num_turns': 0, 'local_command': 'context', 'session_id': s, 'uuid': str(uuid.uuid4())}
+        self.post([table, done])
+        turns = self.client.get('/api/motions/m26/turns/').json()
+        self.assertIn('Context Usage', turns['turns'][-1]['text'])
+        self.assertEqual(turns['agents']['magent']['context']['tokens'], 400_003)
+
+    def test_a_compaction_streams_in_as_one_and_is_the_session_to_resume(self):
+        # `/compact` run by the poller: no reply, just the summary the session
+        # goes on from. It must count as the agent's, or the next wake would
+        # resume the session from before it, uncompacted.
+        older = str(uuid.uuid4())
+        Message.objects.create(id=uuid.uuid4(), sender_id='magent', motion=self.motion, session_id=older,
+                               content=[{'type': 'text', 'text': 'Before.'}], timestamp=1,
+                               input_tokens=3, cache_read_input_tokens=900_000, model_backend='claude-opus-5-5')
+        s = self.session
+        boundary = {'type': 'system', 'subtype': 'compact_boundary', 'session_id': s, 'uuid': str(uuid.uuid4()),
+                    'compact_metadata': {'trigger': 'manual', 'pre_tokens': 970145, 'post_tokens': 12650}}
+        summary = event('user', 'This session is being continued from a previous conversation that ran out '
+                        'of context. The summary below covers the earlier portion of the conversation.\n\n'
+                        'Summary:\n1. Banjo setlist.', session_id=s, isReplay=True)
+        stdout = event('user', '<local-command-stdout>Compacted </local-command-stdout>', session_id=s, isReplay=True)
+        done = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', 'num_turns': 0,
+                'total_cost_usd': 0.4, 'local_command': 'compact', 'session_id': s, 'uuid': str(uuid.uuid4())}
+        self.assertTrue(self.post([boundary, summary, stdout, done]).json()['finished'])
+
+        sessions = self.client.get('/api/motions/m26/sessions/', {'sender': 'magent'}).json()['sessions']
+        self.assertEqual(sessions[0]['session_id'], s)
+        turns = self.client.get('/api/motions/m26/turns/').json()
+        self.assertEqual(len(turns['compactions']), 1)
+        self.assertIn('Banjo setlist', turns['compactions'][0]['html'])
+        self.assertEqual([t['text'] for t in turns['turns']], ['Before.'])  # no stray "Compacted" turn
+        # The pie: about the summary's size, until a turn measures it.
+        context = turns['agents']['magent']['context']
+        self.assertTrue(context['compacted'])
+        self.assertLess(context['tokens'], 100)
 
 
 @override_settings(MOTION_RUNNER_KEYS={'magent': KEY})

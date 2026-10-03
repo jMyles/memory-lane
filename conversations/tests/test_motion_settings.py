@@ -155,7 +155,7 @@ class SettingsAPITest(TestCase):
         manifest = self.client.get('/motions/manifest.webmanifest')
         self.assertEqual(manifest['Content-Type'], 'application/manifest+json')
         body = manifest.json()
-        self.assertEqual((body['name'], body['display'], body['start_url']), ('pickipedia chat', 'standalone', '/motions/'))
+        self.assertEqual((body['name'], body['display'], body['start_url']), ('magenta', 'standalone', '/motions/'))
         icon = self.client.get('/motions/icon-192.png')
         self.assertEqual(icon.content[:8], b'\x89PNG\r\n\x1a\n')
         self.assertEqual(int.from_bytes(icon.content[16:20], 'big'), 192)  # IHDR width

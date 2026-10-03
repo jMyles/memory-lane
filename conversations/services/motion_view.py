@@ -24,6 +24,10 @@ MACHINERY_SENDERS = {'tool-result', 'system'}
 # anyone's words -- the harness writes it, as a prompt -- so never a turn or
 # a mention; the Motion shows it folded, as the moment a context was compacted.
 COMPACTION_PREFIX = 'This session is being continued from a previous conversation'
+INTERRUPT_SOURCE = 'interrupt'
+# System rows shown as a line in the thread.
+NEW_MOOD_SOURCE = 'motion-new'
+EVENT_SOURCES = ('deploy', INTERRUPT_SOURCE, NEW_MOOD_SOURCE)
 # Words posted into a Motion directly, not typed into a session: from the
 # composer, or attested with a key (magenta.sh attest).
 POSTED = ('motion-web', 'motion-attest')
@@ -375,7 +379,7 @@ def render_html(text, mentionable=()):
     return out
 
 
-def timeline(motion, after=None, before=None, limit=None):
+def timeline(motion, after=None, before=None, limit=None, start=None):
     """Readable turns and the agent's tool steps, oldest first.
 
     Yields ('turn', message, text), ('quiet', message, reason) for an
@@ -384,7 +388,8 @@ def timeline(motion, after=None, before=None, limit=None):
     compacted, and ('step', message, None). A step is
     one tool call; its result is fetched on demand (step_detail), so the
     thread stays light. `limit` keeps the newest that many items -- a first
-    load, or a page further back with `before`.
+    load, or a page further back with `before`. `start` includes that message
+    and everything after it (a runner reading from a linked message).
     """
     from conversations.models import ThinkingEntity
 
@@ -392,12 +397,14 @@ def timeline(motion, after=None, before=None, limit=None):
     rows = motion.messages.filter(is_sidechain=False).select_related('sender', 'tooluse', 'thought')
     if after is not None:
         rows = rows.filter(created_at__gt=after.created_at)
+    if start is not None:
+        rows = rows.filter(created_at__gte=start.created_at)
     if before is not None:
         rows = rows.filter(created_at__lt=before.created_at)
 
     def item(msg):
-        if msg.source_file == 'deploy' and isinstance(msg.content, dict):
-            return ('event', msg, msg.content)  # a server redeployed: a line in the thread
+        if msg.source_file in EVENT_SOURCES and isinstance(msg.content, dict):
+            return ('event', msg, msg.content)  # a server redeployed, someone stopped an agent: a line in the thread
         if msg.sender_id in MACHINERY_SENDERS or msg.sender_id not in speakers:
             return None
         if hasattr(msg, 'tooluse'):
@@ -508,8 +515,20 @@ def model_label(model):
 
 
 def how_payload(msg):
-    """Model and effort an agent's message ran on ('' when unknown)."""
-    return {'model': model_label(msg.model_backend), 'effort': msg.effort or ''}
+    """Model and effort an agent's message ran on ('' when unknown); what it
+    wrote and read, in tokens; and whether it ended its turn.
+
+    One response the model gives can be stored as several rows (its thinking,
+    its words, a tool call), each with that response's usage: the page counts
+    a repeat of the same usage once."""
+    out = {'model': model_label(msg.model_backend), 'effort': msg.effort or ''}
+    if msg.output_tokens is not None or msg.input_tokens is not None:
+        out['out'] = msg.output_tokens or 0
+        out['ctx'] = sum(n or 0 for n in (msg.input_tokens, msg.cache_read_input_tokens,
+                                          msg.cache_creation_input_tokens))
+    if msg.stop_reason:
+        out['stop'] = msg.stop_reason
+    return out
 
 
 def attestation_of(msg):
@@ -588,15 +607,46 @@ def context_window(model, tokens=0):
 
 def context_in(motion, agent):
     """{'tokens', 'window', 'model', 'at'} for `agent`'s context here, or None."""
-    row = (motion.messages.filter(sender_id=agent, is_sidechain=False, input_tokens__isnull=False)
+    # A slash command's output (/context, /usage) is a "<synthetic>" message
+    # (stored with no model) that read nothing: it says nothing about the context.
+    row = (motion.messages.filter(sender_id=agent, is_sidechain=False, input_tokens__isnull=False,
+                                  model_backend__isnull=False)
            .order_by('-created_at')
            .values('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'model_backend',
                    'created_at').first())
     if row is None:
         return None
     tokens = sum(row[k] or 0 for k in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))
-    return {'tokens': tokens, 'window': context_window(row['model_backend'], tokens),
-            'model': row['model_backend'] or '', 'at': row['created_at'].isoformat()}
+    window = context_window(row['model_backend'], tokens)
+    # Compacted since (`@magent /compact`): no turn has measured the context
+    # yet, so it is about the summary's size until the next one does.
+    summary = compacted_since(motion, agent, row['created_at'])
+    if summary is not None:
+        return {'tokens': len(summary.text) // CHARS_PER_TOKEN, 'window': window, 'model': row['model_backend'] or '',
+                'at': summary.at.isoformat(), 'compacted': True}
+    return {'tokens': tokens, 'window': window, 'model': row['model_backend'] or '', 'at': row['created_at'].isoformat()}
+
+
+CHARS_PER_TOKEN = 4  # roughly, for English prose
+
+
+class _Summary:
+    def __init__(self, text, at):
+        self.text, self.at = text, at
+
+
+def compacted_since(motion, agent, when):
+    """The summary `agent`'s context went on from, if it was compacted after
+    `when` (its last measured turn); else None. What follows a summary
+    before the next turn is only the command's own echo."""
+    for row in (motion.messages.filter(sender_id=agent, is_sidechain=False, created_at__gt=when)
+                .order_by('-created_at').values('content', 'created_at')[:20]):
+        content = row['content']
+        if isinstance(content, list):
+            content = ' '.join(b.get('text', '') for b in content if isinstance(b, dict) and b.get('type') == 'text')
+        if isinstance(content, str) and is_compaction(content):
+            return _Summary(content, row['created_at'])
+    return None
 
 
 # --- a mention the runner is holding ----------------------------------------
@@ -636,6 +686,32 @@ def set_held(slug, agent, reason, until=None, now=None):
 
 
 def activity(motion, now=None):
+    """What an agent in this Motion is doing now, or None: see _activity.
+    Someone stopping the agent since that began ends it at once, without
+    waiting for its runner to notice."""
+    doing = _activity(motion, now)
+    if doing and doing['doing'] != 'held':
+        stopped = latest_interrupt(motion, doing['agent'])
+        if stopped and stopped['at_ts'] >= doing['since']:
+            return None
+    return doing
+
+
+def latest_interrupt(motion, agent=None):
+    """{'agent', 'by', 'at', 'at_ts'} for the newest time someone stopped
+    `agent` (any agent, if None) here; None if nobody ever has."""
+    for msg in (motion.messages.filter(source_file=INTERRUPT_SOURCE).order_by('-created_at')
+                .only('content', 'timestamp', 'created_at')[:20]):
+        c = msg.content if isinstance(msg.content, dict) else {}
+        if agent is None or c.get('agent') == agent:
+            at = _when(msg)
+            from datetime import datetime, timezone as tz
+            return {'agent': c.get('agent'), 'by': c.get('by'), 'at_ts': at,
+                    'at': datetime.fromtimestamp(at, tz.utc).isoformat()}
+    return None
+
+
+def _activity(motion, now=None):
     """What an agent in this Motion is doing now, or None if nothing is underway.
 
     Read straight from the record, so no process has to report in: every
@@ -776,13 +852,16 @@ def models_q(**kwargs):
 
 def motion_payload(motion):
     from django.db.models import Max
-    last = motion.messages.aggregate(last=Max('created_at'))['last']
+    # What was said, not the system's own rows (a redeploy announced in every
+    # Mood, a rename, a turn's tally): those mustn't make a Mood look active.
+    said = motion.messages.exclude(sender_id='system')
+    last = said.aggregate(last=Max('created_at'))['last']
     return {
         'slug': motion.slug,
         'title': motion.title or motion.slug,
         'description': motion.description,
         'eth_blockheight': motion.eth_blockheight,
-        'message_count': motion.messages.count(),
+        'message_count': said.count(),
         'last_at': last.isoformat() if last else None,
         'participants': sorted(e.name for e in motion.thinking_entities()),
     }

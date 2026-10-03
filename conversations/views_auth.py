@@ -356,3 +356,107 @@ def api_attest(request):
                  'namespace': motion_auth.NAMESPACE, 'key': motion_auth.public_key_of(name)})
     return JsonResponse({'id': str(message_row.id), 'motion': GENERAL,
                          'url': request.build_absolute_uri(f'/motions/{GENERAL}/#m-{message_row.id}')}, status=201)
+
+
+@require_http_methods(['GET', 'POST'])
+def api_interrupt(request, slug):
+    """Stop what an agent is doing in a Motion, as Esc does in a terminal.
+
+    POST {"agent": "magent"}, as the device's person: a turn under way ends
+    (its runner checks every few seconds), and a mention not yet answered is
+    let go -- posted by mistake, say, to be added to. What was said stays
+    in the Motion, so the next mention's wake still reads it. A line in the
+    thread says who stopped whom.
+
+    GET ?agent=magent: the newest such stop here, and whether an AZ5 is in
+    force -- what a runner asks while a turn runs. Readable by anyone, like
+    the thread it is a line in.
+    """
+    from .models import ConversationParticipant
+    from .services import settings as knobs
+    from .services.motion_view import INTERRUPT_SOURCE, latest_interrupt
+    from .views_admin import locked_response
+    motion = get_object_or_404(Motion, slug=slug)
+    if request.method == 'GET':
+        return JsonResponse({'scram': knobs.scram(), 'interrupt': latest_interrupt(motion, request.GET.get('agent'))})
+    if locked_response():
+        return locked_response()
+    device = motion_auth.device_for(request)
+    if device is None:
+        return JsonResponse({'error': 'sign in to stop an agent'}, status=401)
+    try:
+        agent = str(json.loads(request.body or b'{}').get('agent') or 'magent').lower()
+    except (ValueError, AttributeError):
+        return JsonResponse({'error': 'expected {"agent": "<name>"}'}, status=400)
+    if not ThinkingEntity.objects.filter(name=agent, is_biological_human=False).exists():
+        return JsonResponse({'error': f'no agent named {agent}'}, status=400)
+    system, _ = ConversationParticipant.objects.get_or_create(name='system', defaults={'participant_type': 'system'})
+    Message.objects.create(id=uuid.uuid4(), sender=system, motion=motion, source_file=INTERRUPT_SOURCE,
+                           content={'type': 'interrupt', 'agent': agent, 'by': device.entity_id},
+                           timestamp=int(time.time() * 1000))
+    return JsonResponse({'interrupt': latest_interrupt(motion, agent)})
+
+
+@require_POST
+def api_new_motion(request):
+    """Start a Mood, as the device's person: POST {"title", "description"}.
+
+    Its slug comes from the title (made unique), and never changes. Nothing
+    else is needed here: the first @mention there wakes an agent in a new
+    session (a runner that starts new ones; see poller/letter.md for what
+    that session is told). A system row says who started it.
+    """
+    from django.utils.text import slugify
+    from .models import ConversationParticipant
+    from .services.motion_view import NEW_MOOD_SOURCE
+    from .views_admin import locked_response
+    if locked_response():
+        return locked_response()
+    device = motion_auth.device_for(request)
+    if device is None:
+        return JsonResponse({'error': 'sign in to start a Mood'}, status=401)
+    try:
+        body = json.loads(request.body or b'{}')
+        title = str(body.get('title') or '').replace('\x00', '').strip()
+        description = str(body.get('description') or '').replace('\x00', '').strip()
+    except (ValueError, AttributeError):
+        return JsonResponse({'error': 'expected {"title": ...}'}, status=400)
+    if not title:
+        return JsonResponse({'error': 'a title, please'}, status=400)
+    if len(title) > 200 or len(description) > 2000:
+        return JsonResponse({'error': 'at most 200 characters for a title, 2000 for a description'}, status=400)
+    base = slugify(title)[:60].strip('-') or 'mood'
+    slug, n = base, 2
+    while Motion.objects.filter(slug=slug).exists():
+        slug, n = f'{base}-{n}', n + 1
+    motion = Motion.objects.create(slug=slug, title=title, description=description)
+    system, _ = ConversationParticipant.objects.get_or_create(name='system', defaults={'participant_type': 'system'})
+    Message.objects.create(id=uuid.uuid4(), sender=system, motion=motion, source_file=NEW_MOOD_SOURCE,
+                           content={'type': 'created', 'by': device.entity_id, 'title': title},
+                           timestamp=int(time.time() * 1000))
+    return JsonResponse({'slug': motion.slug, 'title': motion.title, 'description': motion.description}, status=201)
+
+
+@require_POST
+def api_archive(request, slug):
+    """Archive a Mood, or bring it back: POST {"archived": true|false}.
+
+    Archiving only takes it out of the Moods list, into "Archived": it stays
+    readable, its containers and sessions are untouched, and a mention there
+    is still answered. Recorded as a setting row: who, and when.
+    """
+    from .services import settings as knobs
+    from .views_admin import locked_response
+    if locked_response():
+        return locked_response()
+    device = motion_auth.device_for(request)
+    if device is None:
+        return JsonResponse({'error': 'sign in to archive a Mood'}, status=401)
+    motion = get_object_or_404(Motion, slug=slug)
+    try:
+        archived = json.loads(request.body or b'{}').get('archived', True)
+        knobs.change('archived', archived, motion=motion, by=device.entity, note='from the Mood')
+    except (ValueError, AttributeError, knobs.Invalid) as e:
+        return JsonResponse({'error': str(e) or 'expected {"archived": true|false}'}, status=400)
+    return JsonResponse({'slug': motion.slug, 'archived': archived})
+

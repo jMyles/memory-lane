@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>pickipedia chat</title>
+<title>magenta</title>
 <link rel="manifest" href="/motions/manifest.webmanifest">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#b8106b" media="(prefers-color-scheme: light)">
@@ -87,13 +87,15 @@
   #devicesBox .dev.revoked, #devicesBox .dev.timed { opacity: .65; }
   #devicesBox button { font: inherit; font-size: 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel);
                        color: var(--ink); cursor: pointer; }
-  #renameBox { position: fixed; z-index: 30; top: 44px; left: 50%; transform: translateX(-50%); width: min(520px, 94vw);
+  #renameBox, #newBox { position: fixed; z-index: 30; top: 44px; left: 50%; transform: translateX(-50%); width: min(520px, 94vw);
                background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 26px rgba(0,0,0,.18);
                padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-  #renameBox[hidden] { display: none; }
-  #renameBox input, #renameBox textarea { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+  #renameBox[hidden], #newBox[hidden] { display: none; }
+  #renameBox .archive { float: right; color: var(--muted); }
+  #newBox .hint { font-size: 12.5px; color: var(--muted); }
+  #renameBox input, #renameBox textarea, #newBox input, #newBox textarea { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
                                           background: var(--bg); color: var(--ink); }
-  #renameBox input { font-size: 17px; font-weight: 600; }
+  #renameBox input, #newBox input { font-size: 17px; font-weight: 600; }
 
   .layout { flex: 1; display: flex; min-height: 0; }
 
@@ -102,7 +104,15 @@
     border-right: 1px solid var(--line); padding: 10px 0;
   }
   nav .label { padding: 4px 16px 8px; font-size: 11px; text-transform: uppercase;
-    letter-spacing: .08em; color: var(--muted); }
+    letter-spacing: .08em; color: var(--muted); display: flex; align-items: center; }
+  nav .label #newMood { margin-left: auto; font: inherit; font-size: 15px; line-height: 1; border: 0; background: none;
+                        color: var(--muted); cursor: pointer; padding: 0 2px; }
+  nav .label #newMood:hover { color: var(--accent); }
+  /* Archived Moods: folded under the list, still readable. */
+  nav #archived { margin-top: 8px; }
+  nav #archived summary { padding: 4px 16px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+                          color: var(--muted); cursor: pointer; }
+  nav #archived a.motion { opacity: .75; }
   nav a.motion {
     display: block; padding: 5px 14px; text-decoration: none; color: inherit;
     border-left: 3px solid transparent;
@@ -111,8 +121,8 @@
   nav a.motion.active { background: var(--accent-soft); border-left-color: var(--accent); }
   nav a.motion .title { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; line-height: 1.3; }
   nav a.motion .meta { font-size: 11.5px; color: var(--muted); line-height: 1.3; }
-  nav a.motion .people-line { display: none; }
-  nav a.motion.active .people-line { display: block; }
+  nav a.motion .people-line:empty { display: none; }
+  header .block { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; cursor: default; }
   /* Someone typing or an agent at work: their name pulses where the Motion is listed. */
   /* What's been happening everywhere, under the list; folds away. */
   #recent, #work { border-top: 1px solid var(--line); margin-top: 8px; padding: 6px 0 12px; font-size: 12.5px; }
@@ -140,8 +150,12 @@
     line-height: 18px; text-align: center;
   }
 
-  main { flex: 1; min-width: 0; overflow-y: auto; padding: 22px 0 0; }  /* no bottom padding: it would hold the sticky footer off the bottom */
-  .inner { max-width: 760px; margin: 0 auto; padding: 0 22px; }
+  main { flex: 1; min-width: 0; overflow-y: auto; padding: 22px 0 0; container-type: inline-size; }  /* no bottom padding: it would hold the sticky footer off the bottom */
+  /* --gutter: what the jump strip takes at the right (25px + margins). When the
+     window leaves room beside the column the text never reaches it; when the
+     column fills the width (a phone, zoomed in), its text stops short of it. */
+  .inner { --gutter: 36px; max-width: 760px; margin: 0 auto;
+           padding: 0 max(22px, calc(var(--gutter) - max(0px, (100cqw - 760px) / 2))) 0 22px; }
 
   .motion-head h1 { font-size: 22px; margin: 0 0 4px; }
   .motion-head .desc { color: var(--muted); margin: 0 0 6px; }
@@ -187,14 +201,19 @@
   #footer { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); }
   /* Up and down a message at a time, at the right of the thread. */
   /* Two pairs: every message (right), people's messages only (left, with a person on them). */
-  #jump { position: absolute; right: 16px; bottom: calc(100% + 12px); display: grid; grid-template-columns: auto auto; gap: 6px; }
-  #jump button { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel);
-                 color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  /* Tight little tabs in the right margin; the thread keeps a gutter clear of them (main, below). */
+  #jump { --jw: 25px; --jh: 19px; position: absolute; right: 4px; bottom: calc(100% + 6px); display: grid;
+          grid-template-columns: auto; gap: 2px; }
+  /* One strip, symmetric: for you, people, every message -- up above, down below. */
+  #jumpMeUp { order: 1; } #jumpHumanUp { order: 2; } #jumpUp { order: 3; }
+  #jumpDown { order: 4; } #jumpHumanDown { order: 5; } #jumpMeDown { order: 6; }
+  #jump button { width: var(--jw); height: var(--jh); border-radius: 3px; border: 1px solid var(--line); background: var(--panel);
+                 color: var(--muted); font-size: 12px; line-height: 1; cursor: pointer; opacity: .85;
                  display: inline-flex; align-items: center; justify-content: center; padding: 0; }
-  #jump button.human { color: var(--human); font-size: 12px; gap: 1px; }
+  #jump button:hover { opacity: 1; }
+  #jump button.human { color: var(--human); font-size: 11px; gap: 0; }
   /* A third pair, for what's for you (mentions of you, answers to you), once you're someone. */
-  #jump button.forme { display: none; color: var(--accent); font-size: 12px; }
-  body.has-me #jump { grid-template-columns: auto auto auto; }
+  #jump button.forme { display: none; color: var(--accent); font-size: 10.5px; letter-spacing: -.5px; }
   body.has-me #jump button.forme { display: inline-flex; }
   #toBottom { display: none; position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(100% + 12px);
               border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 16px;
@@ -228,10 +247,25 @@
   #qresults .note { padding: 12px; color: var(--muted); font-size: 13px; }
   #notify { border: 0; background: none; cursor: pointer; font-size: 15px; padding: 0 2px; color: var(--muted); }
   #notify[hidden] { display: none; }
-  #jump button.human svg { width: 11px; height: 11px; }
+  #jump button.human svg { width: 9px; height: 9px; }
   #jump button:hover { color: var(--accent); border-color: var(--accent); }
   /* Where a session's context was compacted: one line, its summary on demand. */
   /* Something that happened around the conversation: a server redeployed. */
+  a.permalink { color: inherit; text-decoration: none; }
+  a.permalink:hover time { text-decoration: underline; }
+  a.permalink[data-copied]::after { content: ' link copied'; color: var(--accent); font-size: 11px; }
+  /* An agent's turn: everything it did between a person's words and its last, under one header. */
+  .aturn { margin: 4px 0 4px -10px; border-left: 3px solid transparent; }
+  .aturn:hover { border-left-color: var(--line); }
+  .ahead { display: flex; gap: 6px; align-items: baseline; width: 100%; text-align: left; border: 0; background: none;
+           padding: 6px 10px 2px; font: inherit; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+  .ahead b { color: var(--agent); font-weight: 600; }
+  .ahead .caret { width: 10px; flex: none; }
+  .ahead .preview { display: none; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                    color: var(--ink); font-size: 13.5px; }
+  .aturn.folded .ahead .preview { display: block; }
+  .aturn.folded .abody { display: none; }
+  .abody { padding-left: 10px; }
   /* A statement signed with someone's SSH key. */
   .signed { font-size: 11.5px; color: #2e9e5b; border: 1px solid currentColor; border-radius: 10px; padding: 0 7px;
             cursor: pointer; background: none; font-family: inherit; }
@@ -259,6 +293,9 @@
   #activity b { color: var(--agent); }
   /* Held: owed a turn the runner isn't starting yet -- a still dot, not a pulse. */
   #activity.held .dot { animation: none; opacity: .35; }
+  #activity #stopBtn { margin-left: auto; font: inherit; font-size: 12px; padding: 2px 9px; border: 1px solid var(--line);
+                       border-radius: 10px; background: var(--panel); color: var(--muted); cursor: pointer; white-space: nowrap; }
+  #activity #stopBtn:hover { color: var(--err); border-color: var(--err); }
   @keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
   .people { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
   .people .who { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--code); }
@@ -338,6 +375,11 @@
     font: inherit; font-size: 18px; line-height: 1; padding: 8px 10px; background: none; color: var(--muted);
             border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
   #composer #attach:hover { color: var(--ink); }
+  /* On a phone, the agents' settings fold behind ⚙ and Send is an arrow: the room goes to the conversation. */
+  #composer #agentsBtn { display: none; position: relative; font: inherit; font-size: 17px; line-height: 1; padding: 8px 9px;
+                         background: none; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+  #composer #agentsBtn .pie { position: absolute; top: -3px; right: -3px; margin: 0; }
+  #send svg { display: none; width: 18px; height: 18px; vertical-align: middle; }
   #composer.dropping textarea { outline: 2px dashed var(--accent); }
   /* Whether each agent is listening here; a hush for a long deliberation. */
   /* Each agent's listening, model and effort, and its pie: in the footer, always in view. */
@@ -350,10 +392,13 @@
   .hush .ultra { white-space: nowrap; cursor: pointer; }
   .hush .ultra input { vertical-align: -2px; margin: 0 2px 0 0; }
   /* How full an agent's context is: a little pie, its details on hover. */
-  .pie { display: inline-block; width: 11px; height: 11px; border-radius: 50%; vertical-align: -1px; margin-right: 4px;
-         background: conic-gradient(var(--agent) var(--p), transparent 0); box-shadow: inset 0 0 0 1px var(--agent);
-         cursor: help; }
-  .pie.full { background: conic-gradient(var(--accent) var(--p), transparent 0); box-shadow: inset 0 0 0 1px var(--accent); }
+  /* Its colour says how close to compacting: green to 70%, yellow to 80, orange to 90, red above. */
+  .pie { --pc: #2e9e4f; display: inline-block; width: 11px; height: 11px; border-radius: 50%; vertical-align: -1px;
+         margin-right: 4px; background: conic-gradient(var(--pc) var(--p), transparent 0);
+         box-shadow: inset 0 0 0 1px var(--pc); cursor: help; }
+  .pie.warm { --pc: #d4a514; }
+  .pie.hot { --pc: #e8761c; }
+  .pie.full { --pc: #d63a2f; }
   #locked { display: none; background: #3a0d0d; color: #ffd9d9; padding: 8px 16px; font-size: 13.5px; }
   body.locked #locked { display: block; }
   body.locked #composer, body.locked #typing { display: none !important; }
@@ -373,6 +418,7 @@
     header .preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
     #menu { display: block; }
     header .brand { display: none; }  /* the Mood's name matters more here */
+    header .block { display: none; }
     header .crumb::before { content: none; }
     header .preview { max-width: 70px; }
     #serverPop { right: 8px; }
@@ -380,13 +426,20 @@
     nav, #grip { display: none; }
     body.menu-open nav { display: block; width: auto; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--line); }
     main { padding-top: 12px; }
-    .inner { padding: 0 12px; }
+    .inner { padding: 0 max(12px, calc(var(--gutter) - max(0px, (100cqw - 760px) / 2))) 0 12px; }
     .motion-head h1 { font-size: 19px; }
     #activity { padding: 6px 12px; }
     .hush { padding: 4px 12px 0; }
-    #jump { right: 10px; gap: 5px; }
-    #jump button { width: 30px; height: 30px; font-size: 13px; }
-    #composer { padding: 8px 10px 10px; }
+    #jump { right: 3px; }
+    #composer { padding: 6px 8px 8px; gap: 6px; }
+    #composer textarea { min-height: 38px; padding: 7px 9px; }
+    #composer #attach { padding: 8px 9px; }
+    #composer #agentsBtn { display: block; }
+    #composer #send { padding: 8px 10px; }
+    #send .label { display: none; }
+    #send svg { display: inline-block; }
+    .hush { display: none; }
+    body.agents-open .hush:not(:empty) { display: flex; padding: 6px 10px 2px; max-height: 40vh; overflow-y: auto; }
   }
   /* Signed in, you are who you are: no need to choose whose view to see. */
 </style>
@@ -394,10 +447,11 @@
 <body>
 <header>
   <button id="menu" type="button" aria-label="Moods" aria-expanded="false">☰</button>
-  <a class="brand" href="/motions/">pickipedia chat</a>
+  <a class="brand" href="/motions/">magenta</a>
   <span class="crumb" id="crumb"></span>
   {% if preview_label %}<span class="preview" title="A branch's code, not production; see the label for which record">{{ preview_label }}</span>{% endif %}
   <span class="grow"></span>
+  <span class="block" id="block" title="Ethereum mainnet's block height"></span>
   <span class="servers" id="servers" title="Servers"></span>
   <button id="searchBtn" type="button" title="Search what was said (/)">⌕</button>
   <span class="status" id="status" title="connecting…"></span>
@@ -421,7 +475,14 @@
 <form id="renameBox" hidden>
   <input id="renameTitle" maxlength="200" aria-label="Title" placeholder="Title">
   <textarea id="renameDesc" rows="2" maxlength="2000" aria-label="Description" placeholder="What it's about (optional)"></textarea>
-  <span><button type="submit">Rename</button> <button type="button" id="renameCancel">Cancel</button></span>
+  <span><button type="submit">Rename</button> <button type="button" id="renameCancel">Cancel</button>
+    <button type="button" id="archiveBtn" class="archive" title="Out of the Moods list, into Archived. It stays readable, its sessions and container untouched, and a mention there is still answered.">Archive</button></span>
+</form>
+<form id="newBox" hidden>
+  <input id="newTitle" maxlength="200" aria-label="Title" placeholder="What the new Mood is about">
+  <textarea id="newDesc" rows="2" maxlength="2000" aria-label="Description" placeholder="A line or two more (optional)"></textarea>
+  <span class="hint">Its first @magent starts a new session there, briefed by the letter magent left itself.</span>
+  <span><button type="submit">Start</button> <button type="button" id="newCancel">Cancel</button></span>
 </form>
 <div id="locked"></div>
 <div id="search" hidden role="search">
@@ -443,14 +504,15 @@
     <button type="button" id="toBottom">↓ newest</button>
     <div id="typing"></div>
     <div id="tasks"></div>
-    <div id="activity"><span class="dot"></span><span id="activityText"></span></div>
+    <div id="activity"><span class="dot"></span><span id="activityText"></span><button type="button" id="stopBtn" title="Stop it, as Esc does in a terminal (Esc in the message box does the same). What was said stays; add to it and it reads both." hidden>■ stop</button></div>
     <div class="hush" id="hush"></div>
     <form id="composer" autocomplete="off">
       <div id="suggest"></div>
+      <button type="button" id="agentsBtn" title="Agents here: listening, model, effort" aria-label="Agent settings" aria-expanded="false">⚙</button>
       <button type="button" id="attach" title="Add an image (or paste or drop one)" aria-label="Add an image">＋</button>
       <input type="file" id="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
       <textarea id="say" placeholder="Say something. @name to address someone; [[Page]] links PickiPedia. Enter sends; Ctrl+Enter for a new line." rows="2"></textarea>
-      <button type="submit" id="send">Send</button>
+      <button type="submit" id="send" aria-label="Send"><span class="label">Send</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20.5 21 12 3 3.5 3 10l12 2-12 2z" fill="currentColor"/></svg></button>
     </form>
     </div>
   </main>
@@ -488,7 +550,7 @@
   let me = viewer || store.get('me', '') || '';
   let lastSeen = store.get('lastSeen', {});   // slug -> iso
   let badges = {};          // slug -> count of my mentions since lastSeen
-  let baseTitle = 'pickipedia chat';
+  let baseTitle = 'magenta';
   let people = [];          // everyone who can be named, for @-completion
   let human = {};           // name -> is a person
   let act = null;           // what an agent is doing now, from /turns/
@@ -529,23 +591,77 @@
     try { if (navigator.setAppBadge) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()); } catch (e) {}
   }
 
+  let archivedOpen = false;
   function renderNav() {
-    const items = motions.map(m => `
+    const item = m => `
       <a class="motion ${m.slug === current ? 'active' : ''}" href="/motions/${encodeURIComponent(m.slug)}/" data-slug="${esc(m.slug)}">
         <div class="title">${esc(m.title)}${badges[m.slug] ? `<span class="badge">${badges[m.slug]}</span>` : ''}</div>
         <div class="meta">${m.message_count.toLocaleString()} · ${ago(m.last_at)}</div>
-        <div class="meta people-line">${m.participants.map(n => `<span class="nm" data-who="${esc(n)}">${esc(n)}</span>`).join(', ') || '—'}</div>
-      </a>`).join('');
-    document.getElementById('moodList').innerHTML = '<div class="label">Moods</div>' + items;
+        <div class="meta people-line">${peopleLine(m.slug)}</div>
+      </a>`;
+    const live = motions.filter(m => !m.archived), archived = motions.filter(m => m.archived);
+    // The one open stays in view: an archived Mood opened shows its fold open.
+    const open = archivedOpen || archived.some(m => m.slug === current);
+    document.getElementById('moodList').innerHTML =
+      `<div class="label">Moods${viewer ? '<button type="button" id="newMood" title="Start a Mood" aria-label="Start a Mood">＋</button>' : ''}</div>`
+      + live.map(item).join('')
+      + (archived.length ? `<details id="archived"${open ? ' open' : ''}><summary>Archived (${archived.length})</summary>`
+         + archived.map(item).join('') + '</details>' : '');
+    const fold = document.getElementById('archived');
+    if (fold) fold.addEventListener('toggle', () => { archivedOpen = fold.open; });
     markLive();
   }
 
-  // Pulse the names of whoever is typing or at work in the open Motion.
-  function markLive() {
-    const live = new Set(typingNow);
-    if (act && act.doing !== 'held') live.add(act.agent);  // held isn't busy
-    nav.querySelectorAll('a.motion.active .nm').forEach(el => el.classList.toggle('live', live.has(el.dataset.who)));
+  // Who's around in each Mood: whoever spoke in the last 100 blocks (about 20
+  // minutes), and whoever is typing or at work there now, their name pulsing.
+  let liveData = {};
+  function aroundIn(slug) {
+    const d = liveData[slug] || { speakers: [], typing: [], busy: null };
+    const typing = new Set(slug === current ? [...d.typing, ...typingNow] : d.typing);
+    const busy = slug === current && act && act.doing !== 'held' ? act.agent : d.busy;
+    const names = [...new Set([...(busy ? [busy] : []), ...typing, ...d.speakers])];
+    return { names, active: new Set([...typing, ...(busy ? [busy] : [])]) };
   }
+  function peopleLine(slug) {
+    const { names, active } = aroundIn(slug);
+    return names.map(n => `<span class="nm${active.has(n) ? ' live' : ''}" data-who="${esc(n)}">${esc(n)}</span>`).join(', ');
+  }
+  function markLive() {
+    nav.querySelectorAll('a.motion').forEach(a => {
+      const line = a.querySelector('.people-line');
+      const html = peopleLine(a.dataset.slug);
+      if (line && line.innerHTML !== html) line.innerHTML = html;
+    });
+  }
+  async function refreshLive() {
+    try {
+      const r = await fetch('/api/motions/live/');
+      if (r.ok) { liveData = (await r.json()).motions || {}; markLive(); }
+    } catch (e) {}
+  }
+  setInterval(refreshLive, 5000);
+  refreshLive();
+
+  // --- the chain's height: from the explorer now and then, a block every 12 s between ---
+  const blockEl = document.getElementById('block');
+  let blockAnchor = null;
+  async function refreshBlock() {
+    try {
+      const b = await (await fetch('/api/block/')).json();
+      if (b.height) blockAnchor = b;
+    } catch (e) {}
+    tickBlock();
+  }
+  function tickBlock() {
+    if (!blockAnchor) { blockEl.textContent = ''; return; }
+    const since = Math.max(0, (Date.now() - new Date(blockAnchor.at).getTime()) / 1000);
+    const height = blockAnchor.height + Math.floor(since / blockAnchor.seconds);
+    blockEl.textContent = '⛓ ' + height.toLocaleString();
+    blockEl.title = `Ethereum mainnet, about block ${height.toLocaleString()} (counted on from the explorer's ${blockAnchor.height.toLocaleString()})`;
+  }
+  setInterval(tickBlock, 3000);
+  setInterval(refreshBlock, 5 * 60 * 1000);
+  refreshBlock();
 
   const grip = document.getElementById('grip');
   const NAV_MIN = 140, NAV_MAX = 480;
@@ -609,7 +725,7 @@
     el.id = 'm-' + t.id;
     if (forMe.has(t.id)) el.classList.add('for-me');
     const signed = t.attested ? `<button type="button" class="signed" title="Signed with ${esc(t.sender)}'s SSH key: click for the proof">✓ signed</button>` : '';
-    el.innerHTML = `<div class="who"><span class="name">${icon(t.sender, t.is_human)}${esc(t.sender)}</span><time datetime="${t.created_at}">${stamp(t.created_at)}</time>${how(t)}${signed}</div><div class="body">${t.html}</div>`;
+    el.innerHTML = `<div class="who"><span class="name">${icon(t.sender, t.is_human)}${esc(t.sender)}</span><a class="permalink" href="#m-${esc(t.id)}" title="This message's link: click to copy (paste it with an @mention to have an agent read from here)"><time datetime="${t.created_at}">${stamp(t.created_at)}</time></a>${how(t)}${signed}</div><div class="body">${t.html}</div>`;
     if (t.attested) el._proof = t.attested;
     markTurn(el, t.mentions || []);
     return el;
@@ -714,6 +830,15 @@
   }
   function addEvent(e, container) {
     const el = document.createElement('div');
+    if (e.type === 'interrupt' || e.type === 'created') {  // someone pressed stop; someone started this Mood
+      el.className = 'event';
+      el.innerHTML = e.type === 'created'
+        ? `✦ <b>${esc(e.by || 'someone')}</b> started this Mood · ${esc(stamp(e.created_at))}`
+        : `■ <b>${esc(e.by || 'someone')}</b> stopped ${esc(e.agent || 'the agent')} · ${esc(stamp(e.created_at))}`;
+      container.appendChild(el);
+      prev = null;
+      return;
+    }
     el.className = 'event ' + (e.state || '');
     const commit = e.commit ? ` · <code>${esc(e.commit.slice(0, 8))}</code>` : '';
     const by = e.by ? ` · by ${esc(e.by)}` : '';
@@ -795,7 +920,7 @@
   function jump(dir, only = '') {
     const top = main.getBoundingClientRect().top;
     const sel = only ? only.split(',').map(c => '#turns .turn' + c.trim()).join(', ') : '#turns .turn';
-    const turns = [...document.querySelectorAll(sel)];
+    const turns = [...document.querySelectorAll(sel)].filter(t => !t.closest('.aturn.folded') || t.closest('.abody') === null);
     const at = t => t.getBoundingClientRect().top - top;
     const target = dir > 0 ? turns.find(t => at(t) > 16) : turns.reverse().find(t => at(t) < -16);
     if (target) main.scrollTo({ top: main.scrollTop + at(target) - 8, behavior: 'smooth' });
@@ -826,17 +951,48 @@
     crumb.innerHTML = m ? esc(m.title) + (viewer ? '<button type="button" id="rename" title="Rename this Mood" aria-label="Rename this Mood">✎</button>' : '') : '';
     const h1 = document.querySelector('.motion-head h1');
     if (h1 && m) h1.textContent = m.title;
-    if (m) { baseTitle = m.title + ' · pickipedia chat'; setTitle(); }
+    if (m) { baseTitle = m.title + ' · magenta'; setTitle(); }
   }
-  document.addEventListener('click', e => {
+  const isArchived = slug => !!(motions.find(m => m.slug === slug) || {}).archived;
+  const newBox = document.getElementById('newBox');
+  document.addEventListener('click', async e => {
     if (e.target.closest('#rename')) {
       document.getElementById('renameTitle').value = headMotion.title;
       document.getElementById('renameDesc').value = headMotion.description || '';
+      document.getElementById('archiveBtn').textContent = isArchived(current) ? 'Unarchive' : 'Archive';
       renameBox.hidden = false;
       document.getElementById('renameTitle').focus();
     } else if (e.target.closest('#renameCancel')) {
       renameBox.hidden = true;
+    } else if (e.target.closest('#archiveBtn')) {
+      const r = await fetch(`/api/motions/${encodeURIComponent(current)}/archive/`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
+        body: JSON.stringify({ archived: !isArchived(current) }),
+      });
+      if (!r.ok) { showError('archive: ' + ((await r.json().catch(() => ({}))).error || r.status)); return; }
+      renameBox.hidden = true;
+      loadMotions();
+    } else if (e.target.closest('#newMood')) {
+      document.getElementById('newTitle').value = '';
+      document.getElementById('newDesc').value = '';
+      newBox.hidden = false;
+      document.getElementById('newTitle').focus();
+    } else if (e.target.closest('#newCancel')) {
+      newBox.hidden = true;
     }
+  });
+  newBox.addEventListener('submit', async e => {
+    e.preventDefault();
+    const r = await fetch('/api/motions/new/', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
+      body: JSON.stringify({ title: document.getElementById('newTitle').value,
+                             description: document.getElementById('newDesc').value }),
+    });
+    if (!r.ok) { showError('new Mood: ' + ((await r.json().catch(() => ({}))).error || r.status)); return; }
+    const made = await r.json();
+    newBox.hidden = true;
+    await loadMotions();
+    open(made.slug, true);
   });
   renameBox.addEventListener('submit', async e => {
     e.preventDefault();
@@ -890,11 +1046,107 @@
             ...(data.events || []).map(e => ({ kind: 'event', v: e }))]
       .sort((a, b) => a.v.created_at < b.v.created_at ? -1 : a.v.created_at > b.v.created_at ? 1 : 0);
   }
+  // A message's link: /motions/<slug>/#m-<id>. Clicking its time copies it.
+  document.addEventListener('click', async e => {
+    const a = e.target.closest('a.permalink');
+    if (!a) return;
+    e.preventDefault();
+    const url = `${location.origin}/motions/${encodeURIComponent(current)}/${a.getAttribute('href')}`;
+    try { await navigator.clipboard.writeText(url); a.dataset.copied = '1'; setTimeout(() => delete a.dataset.copied, 1500); }
+    catch (err) { history.replaceState(history.state, '', url); }
+  });
+
+  // --- an agent's turn, gathered under one header --------------------------------
+  // Everything an agent did between a person's words and its turn's end -- its
+  // words along the way, its thinking, its steps -- in one block: a header
+  // (who, how long, on what, how many tokens) that folds the rest away.
+  function agentOf(it) {
+    if (it.kind === 'turn') return it.v.is_human ? null : it.v.sender;
+    return it.kind === 'step' || it.kind === 'thought' ? it.v.sender : null;
+  }
+  function kTokens(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1000) return (n < 10000 && n % 1000 ? (n / 1000).toFixed(1) : Math.round(n / 1000)) + 'k';
+    return String(n);
+  }
+  function blockFor(container, agent, v) {
+    const last = container.lastElementChild;
+    if (last && last.classList.contains('aturn') && !last._ended && last._agent === agent) return last;
+    closeBlock(container);  // another agent's turn begins
+    const b = document.createElement('section');
+    b.className = 'aturn';
+    const at = new Date(v.created_at).getTime() / 1000;
+    // From the words that set it going, when they're just before it.
+    const asked = container._askedAt && container._askedAt <= at && at - container._askedAt < 6 * 3600 ? container._askedAt : at;
+    Object.assign(b, { _agent: agent, _start: asked, _end: at, _out: 0, _ctx: 0, _seen: new Set(), _how: {}, _ended: false, _final: '' });
+    b.innerHTML = '<button type="button" class="ahead"></button><div class="abody"></div>';
+    container.appendChild(b);
+    return b;
+  }
+  function tally(b, v) {
+    b._end = Math.max(b._end, new Date(v.created_at).getTime() / 1000);
+    if (v.out != null) {
+      const usage = v.out + ':' + v.ctx;  // one response stored as several rows carries one usage
+      if (!b._seen.has(usage)) { b._seen.add(usage); b._out += v.out; }
+      if (v.ctx) b._ctx = v.ctx;
+    }
+    if (v.model) b._how.model = v.model;
+    if (v.effort) b._how.effort = v.effort;
+  }
+  function drawBlockHead(b) {
+    const took = Math.max(0, Math.round(b._end - b._start));
+    const how = [b._how.model, b._how.effort].filter(Boolean).join(' · ');
+    const tokens = b._out || b._ctx ? `${kTokens(b._out)} out · ${kTokens(b._ctx)} context` : '';
+    b.querySelector('.ahead').innerHTML = `<span class="caret">${b.classList.contains('folded') ? '▸' : '▾'}</span>`
+      + `${icon(b._agent, false)}<b>${esc(b._agent)}</b>`
+      + [took ? elapsed(Date.now() / 1000 - took) : '', how, tokens].filter(Boolean).map(x => ' · ' + esc(x)).join('')
+      + (!b._ended && isWorking(b) ? ' · working…' : '')
+      + `<span class="preview">${esc(b._final)}</span>`;
+  }
+  // Working only if it's the newest thing here and the agent is at work now.
+  function isWorking(b) {
+    return b.parentNode && b.parentNode.lastElementChild === b && act && act.agent === b._agent && act.doing !== 'held';
+  }
+  // A turn that a person spoke after is over, whether or not its end was marked.
+  function closeBlock(container) {
+    const last = container.lastElementChild;
+    if (last && last.classList.contains('aturn') && !last._ended) { last._ended = true; drawBlockHead(last); }
+  }
+
+  function foldOld(container, keepNewest = true) {
+    // Older finished turns fold away; the newest stays open.
+    const blocks = [...container.querySelectorAll(':scope > .aturn')];
+    (keepNewest ? blocks.slice(0, -1) : blocks).forEach(b => { if (b._ended && !b.classList.contains('folded')) { b.classList.add('folded'); drawBlockHead(b); } });
+  }
+  document.addEventListener('click', e => {
+    const head = e.target.closest('.ahead');
+    if (!head) return;
+    const b = head.closest('.aturn');
+    b.classList.toggle('folded');
+    drawBlockHead(b);
+  });
+
   function renderItems(items, container, isNew) {
     for (const it of items) {
-      if (it.kind === 'turn') container.appendChild(turnEl(it.v, isNew));
+      const agent = agentOf(it);
+      if (agent) {
+        const b = blockFor(container, agent, it.v);
+        const body = b.querySelector('.abody');
+        if (it.kind === 'turn') {
+          body.appendChild(turnEl(it.v, isNew));
+          if (it.v.stop === 'end_turn') { b._ended = true; b._final = (it.v.text || '').split('\n')[0].slice(0, 200); }
+        } else if (it.kind === 'thought') addThought(it.v, body);
+        else addStep(it.v, body);
+        tally(b, it.v);
+        drawBlockHead(b);
+        continue;
+      }
+      closeBlock(container);
+      if (it.kind === 'turn') {
+        container.appendChild(turnEl(it.v, isNew));
+        container._askedAt = new Date(it.v.created_at).getTime() / 1000;
+      }
       else if (it.kind === 'quiet') addQuiet(it.v, container);
-      else if (it.kind === 'thought') addThought(it.v, container);
       else if (it.kind === 'compaction') addCompaction(it.v, container);
       else if (it.kind === 'event') addEvent(it.v, container);
       else addStep(it.v, container);
@@ -1137,6 +1389,8 @@
     for (let i = 0; i < 12; i++) {
       const el = document.getElementById('m-' + id);
       if (el) {
+        const folded = el.closest('.aturn.folded');
+        if (folded) { folded.classList.remove('folded'); drawBlockHead(folded); }
         el.scrollIntoView({ block: 'center' });
         el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
         return true;
@@ -1179,8 +1433,6 @@
     gen++;
     current = slug;
     if (push) history.pushState({ slug }, '', '/motions/' + encodeURIComponent(slug) + '/');
-    // What was waiting for me here, to bring into view once it's drawn.
-    const waiting = [...(unread[slug] || new Map()).entries()].sort((a, b) => (a[1] < b[1] ? -1 : 1))[0];
     newBelow = 0;
     touch(slug);
     renderNav();
@@ -1196,15 +1448,24 @@
       inner.replaceChildren(saved.nodes);
       ({ lastId, firstId, prev } = saved);
       showMotionName(saved.headMotion);
-      main.scrollTop = saved.scrollTop;
       await poll(false);
     } else {
       lastId = null;
       inner.innerHTML = '<div class="empty">Loading…</div>';
       await poll(true);
     }
+    // A Mood opens at its newest, always: what's for you is marked, and the @
+    // arrows (or a notification, a search hit, a link) take you to it.
+    toNewest();
     renderToBottom();
-    if (waiting) await reveal(waiting[0]);
+  }
+  // To the newest, and stay there while images above it load and push it down.
+  function toNewest() {
+    main.scrollTop = main.scrollHeight;
+    const until = Date.now() + 4000;
+    document.querySelectorAll('#turns img').forEach(img => {
+      if (!img.complete) img.addEventListener('load', () => { if (Date.now() < until) main.scrollTop = main.scrollHeight; }, { once: true });
+    });
   }
 
   let firstId = null;      // the oldest item shown, for ?before=
@@ -1221,6 +1482,7 @@
       const box = document.createElement('div');
       const saved = prev; prev = null;
       renderItems(items, box, false);
+      foldOld(box, false);  // an earlier page: all of it is old
       prev = saved;
       const turnsEl = document.getElementById('turns');
       const height = main.scrollHeight;
@@ -1284,6 +1546,7 @@
       const nearBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
       const emptyNote = turnsEl.querySelector('.empty'); if (emptyNote) emptyNote.remove();
       renderItems(items, turnsEl, !full);
+      if (full) foldOld(turnsEl);
       lastId = items[items.length - 1].v.id;
       if (full || nearBottom) main.scrollTop = main.scrollHeight;
       else if (!full) { newBelow += data.turns.length; }
@@ -1331,6 +1594,7 @@
   const MODELS = [['', 'default model'], ['opus', 'opus'], ['sonnet', 'sonnet'], ['fable', 'fable'], ['haiku', 'haiku']];
   const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
   const EFFORT_LABELS = { xhigh: 'extra' };  // as the terminal names them
+  const READS = [2500, 5000, 10000, 20000];  // tokens a wake reads word for word (catch_up_tokens)
   let agentsNow = {}, agentsShown = '';
   function describeListening(l) {
     const until = l.until ? ' until ' + new Date(l.until).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
@@ -1342,19 +1606,25 @@
     const c = (agentsNow[name] || {}).context;
     if (!c || !c.window) return null;
     const pct = Math.min(100, Math.round(100 * c.tokens / c.window));
-    const title = `context ${pct}% full · ${c.tokens.toLocaleString()} of ${c.window.toLocaleString()} tokens`
-      + (c.model ? ` · ${shortModel(c.model)}` : '') + ` · as of ${stamp(c.at)}`;
+    const title = c.compacted
+      ? `compacted ${stamp(c.at)} · about ${c.tokens.toLocaleString()} tokens of ${c.window.toLocaleString()}, the summary; its next turn measures it`
+      : `context ${pct}% full · ${c.tokens.toLocaleString()} of ${c.window.toLocaleString()} tokens`
+        + (c.model ? ` · ${shortModel(c.model)}` : '') + ` · as of ${stamp(c.at)}`;
     return { pct, title };
   }
   // Wherever an agent is named with its settings -- the people chips, the
   // agent rows -- its pie leads; drawn in place, since the rest changes rarely.
   function refreshPies() {
-    document.querySelectorAll('.people .who.agent, #hush .agent').forEach(el => {
+    // ⚙ on a phone carries the pie of whichever agent here is fullest.
+    const fullest = Object.keys(agentsNow).sort((a, b) => ((pieAttrs(b) || {}).pct || 0) - ((pieAttrs(a) || {}).pct || 0))[0];
+    const gear = document.getElementById('agentsBtn');
+    if (fullest) gear.dataset.who = fullest; else delete gear.dataset.who;
+    document.querySelectorAll('.people .who.agent, #hush .agent, #agentsBtn').forEach(el => {
       const a = pieAttrs(el.dataset.who);
       let p = el.querySelector('.pie');
       if (!a) { if (p) p.remove(); return; }
       if (!p) { p = document.createElement('span'); el.prepend(p); }
-      p.className = 'pie' + (a.pct >= 80 ? ' full' : '');
+      p.className = 'pie' + (a.pct > 90 ? ' full' : a.pct > 80 ? ' hot' : a.pct > 70 ? ' warm' : '');
       p.style.setProperty('--p', a.pct + '%');
       p.title = a.title;
     });
@@ -1363,7 +1633,7 @@
     agentsNow = agents;
     const box = document.getElementById('hush');
     // Redraw the menus only when a setting changed: never under someone's open menu.
-    const key = JSON.stringify(Object.entries(agents).map(([n, a]) => [n, a.listening, a.model, a.effort, a.ultracode, viewer]));
+    const key = JSON.stringify(Object.entries(agents).map(([n, a]) => [n, a.listening, a.model, a.effort, a.ultracode, a.reads, viewer]));
     if (box && (key !== agentsShown || !box.childElementCount)) {
       agentsShown = key;
       box.innerHTML = agentRows(agents);
@@ -1376,7 +1646,7 @@
       const row = `<span class="agent${l.mode === 'on' ? '' : ' off'}" data-who="${esc(agent)}">${icon(agent, false)}${esc(agent)}: `;
       if (!viewer) {
         return row
-          + `${esc(describeListening(l))} · ${esc(a.model || 'default model')} · effort ${esc(EFFORT_LABELS[a.effort] || a.effort)}`
+          + `${esc(describeListening(l))} · ${esc(a.model || 'default model')} · effort ${esc(EFFORT_LABELS[a.effort] || a.effort)} · reads ${esc(kTokens(a.reads || 10000))}`
           + (a.ultracode ? ' · ultracode' : '') + '</span>';
       }
       const listen = `<select data-agent="${esc(agent)}" data-knob="listening"><option selected disabled>${esc(describeListening(l))}</option>`
@@ -1387,9 +1657,13 @@
           + `${esc(v ? label : (ctx.model ? `default (${shortModel(ctx.model)})` : label))}</option>`).join('') + '</select>';
       const effort = `<select data-agent="${esc(agent)}" data-knob="mention_effort" title="how hard it thinks when @mentioned here">`
         + EFFORTS.map(v => `<option value="${v}"${v === a.effort ? ' selected' : ''}>effort ${EFFORT_LABELS[v] || v}</option>`).join('') + '</select>';
+      // How much of what was said since its last word a wake reads word for word.
+      const reads = `<select data-agent="${esc(agent)}" data-knob="catch_up_tokens" title="How much of what was said here since it last spoke a wake reads word for word; older is summarized">`
+        + READS.map(n => `<option value="${n}"${n === a.reads ? ' selected' : ''}>reads ${kTokens(n)}</option>`).join('')
+        + (READS.includes(a.reads) ? '' : `<option value="${a.reads}" selected>reads ${kTokens(a.reads)}</option>`) + '</select>';
       const ultra = `<label class="ultra" title="Claude Code's standing multi-agent workflows, on wakes with full tools: thorough, and costly">`
         + `<input type="checkbox" data-agent="${esc(agent)}" data-knob="ultracode"${a.ultracode ? ' checked' : ''}> ultracode</label>`;
-      return `${row}${listen} ${model} ${effort} ${ultra}</span>`;
+      return `${row}${listen} ${model} ${effort} ${reads} ${ultra}</span>`;
     }).join('');
   }
   document.addEventListener('change', async e => {
@@ -1441,11 +1715,35 @@
     markLive();
   }
 
+  // Stop what the agent here is doing: a turn under way ends within seconds,
+  // and a mention it hasn't answered yet is let go (POST .../interrupt/).
+  const stopBtn = document.getElementById('stopBtn');
+  async function interrupt() {
+    if (!act || act.doing === 'held' || !viewer || !current) return false;
+    stopBtn.disabled = true;
+    try {
+      const r = await fetch('/api/motions/' + encodeURIComponent(current) + '/interrupt/', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
+        body: JSON.stringify({ agent: act.agent }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
+      act = null; renderActivity();
+      await poll(false);
+    } catch (e) { showError('stop: ' + e.message); }
+    finally { stopBtn.disabled = false; }
+    return true;
+  }
+  stopBtn.addEventListener('click', interrupt);
+
   function renderActivity() {
+    const turnsEl = document.getElementById('turns');
+    const newest = turnsEl && turnsEl.lastElementChild;
+    if (newest && newest.classList.contains('aturn')) drawBlockHead(newest);
     document.querySelectorAll('.people .who').forEach(el => el.classList.toggle('busy', !!act && act.doing !== 'held' && el.dataset.who === act.agent));
     activityEl.classList.toggle('on', !!act);
     activityEl.classList.toggle('held', !!act && act.doing === 'held');
     markLive();
+    stopBtn.hidden = !(viewer && act && act.doing !== 'held');
     if (!act) return;
     const hhmm = iso => new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
     activityText.innerHTML = act.doing === 'waking'
@@ -1571,7 +1869,11 @@
     } else if ((e.key === 'Enter' && !e.ctrlKey && !e.metaKey) || e.key === 'Tab') {
       e.preventDefault(); e.stopImmediatePropagation(); acceptSuggest(chosen);
       return;
-    } else if (e.key === 'Escape') { closeSuggest(); }
+    } else if (e.key === 'Escape') { e.preventDefault(); closeSuggest(); }
+  });
+  // Esc in the box, with no suggestions open: stop the agent, as in a terminal.
+  sayBox.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !e.defaultPrevented && act && act.doing !== 'held') { e.preventDefault(); interrupt(); }
   });
   suggest.addEventListener('mousedown', e => { const d = e.target.closest('[data-i]'); if (d) { e.preventDefault(); acceptSuggest(+d.dataset.i); } });
   sayBox.addEventListener('blur', () => setTimeout(closeSuggest, 150));
@@ -1581,12 +1883,24 @@
     renderMe(); remarkAll(); resetBadges(); refreshBadges(true);
   });
   onlyMine.addEventListener('change', () => document.body.classList.toggle('only-mine', onlyMine.checked));
+  const agentsBtn = document.getElementById('agentsBtn');
+  agentsBtn.addEventListener('click', () => {
+    agentsBtn.setAttribute('aria-expanded', document.body.classList.toggle('agents-open'));
+  });
   const menu = document.getElementById('menu');
   menu.addEventListener('click', () => {
     menu.setAttribute('aria-expanded', document.body.classList.toggle('menu-open'));
   });
   nav.addEventListener('click', e => { if (e.target.closest('a.motion')) document.body.classList.remove('menu-open'); });
-  if (matchMedia('(max-width: 720px)').matches) sayBox.placeholder = 'Say something · @name · [[Page]]';
+  // On a phone: one line until there's more to say, growing with the text (to 40% of the screen).
+  const phone = matchMedia('(max-width: 720px)').matches;
+  function fitSay() {
+    if (!phone) return;
+    sayBox.style.height = 'auto';
+    sayBox.style.height = sayBox.scrollHeight + 2 + 'px';
+  }
+  if (phone) { sayBox.placeholder = 'Say something · @name · [[Page]]'; sayBox.rows = 1; }
+  sayBox.addEventListener('input', fitSay);
 
   // Tell the Motion this person is typing: at most every 3s while there is
   // text, and once when it is cleared or sent.
@@ -1725,7 +2039,7 @@
         body: JSON.stringify({ text }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
-      sayBox.value = ''; typingSent = 0; sendTyping(false);
+      sayBox.value = ''; fitSay(); typingSent = 0; sendTyping(false);
       await poll(false);
     } catch (e) {
       composer.insertAdjacentHTML('beforeend', `<span class="err">${esc(e.message)}</span>`);

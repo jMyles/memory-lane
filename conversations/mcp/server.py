@@ -100,6 +100,24 @@ def create_mcp_server():
                 }
             ),
             types.Tool(
+                name="list_moods",
+                description="List the Moods (memory-lane's Motions: the conversations people and agents share, each about one thing), most recently active first, with what each is about, its size and who's in it.",
+                inputSchema={"type": "object", "properties": {}}
+            ),
+            types.Tool(
+                name="read_mood",
+                description="Read what people and agents said in one Mood, oldest first: its newest turns, or everything from a message (its id, as in a #m-<id> link) or a time on. Use it to catch up on a Mood you weren't woken in.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "slug": {"type": "string", "description": "The Mood, as list_moods names it (e.g. magenta-26-million)"},
+                        "from": {"type": "string", "description": "Start here: a message id (the <id> of a #m-<id> link) or an ISO time"},
+                        "limit": {"type": "number", "description": "Turns at most (default 60, max 300)", "default": 60}
+                    },
+                    "required": ["slug"]
+                }
+            ),
+            types.Tool(
                 name="list_threads",
                 description="List distinct conversation threads, most recently active first, with message count, first/last activity, participants, working directory, and a title hint from the first substantive human message. Use this before get_recent_work to see what separate things were happening instead of one interleaved stream.",
                 inputSchema={

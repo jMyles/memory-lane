@@ -197,6 +197,87 @@ async def handle_random_messages(arguments):
     return [types.TextContent(type="text", text='\n'.join(lines))]
 
 
+# --- Moods (memory-lane's Motions): what each is, and what was said in one ------
+
+READ_MOOD_MAX = 300      # turns at most in one read
+READ_MOOD_CHARS = 60_000  # and about this much text; the oldest go first
+EACH_CHARS = 4000
+
+
+def list_moods_text():
+    from django.db.models import Max
+    from conversations.models import Motion
+    lines = []
+    moods = []
+    for motion in Motion.objects.all():
+        said = motion.messages.exclude(sender_id='system')
+        last = said.aggregate(last=Max('created_at'))['last']
+        moods.append((last, motion, said.count()))
+    moods.sort(key=lambda m: m[0].isoformat() if m[0] else '', reverse=True)
+    lines.append(f"{len(moods)} Moods, most recently active first:\n")
+    for last, motion, count in moods:
+        people = sorted(e.name for e in motion.thinking_entities())
+        lines.append(f"{motion.slug} -- {motion.title or motion.slug}")
+        if motion.description:
+            lines.append(f"    {motion.description[:200]}")
+        lines.append(f"    {count} messages · last {last.isoformat() if last else 'never'} · with {', '.join(people) or 'nobody yet'}\n")
+    lines.append("read_mood with a slug reads what was said there.")
+    return '\n'.join(lines)
+
+
+def read_mood_text(slug, start=None, limit=60):
+    """What people and agents said in a Mood, oldest first: the newest `limit`
+    turns, or from `start` (a message id, or an ISO time) on."""
+    from django.utils.dateparse import parse_datetime
+    from conversations.models import Message, Motion
+    from conversations.services.motion_view import turns
+    motion = Motion.objects.filter(slug=slug).first()
+    if motion is None:
+        return f"No Mood '{slug}'. list_moods names them all."
+    limit = max(1, min(int(limit or 60), READ_MOOD_MAX))
+    found = list(turns(motion))  # (message, text), oldest first
+    if start:
+        when = None
+        anchor = Message.objects.filter(id=start).first() if len(str(start)) == 36 else None
+        if anchor is not None:
+            when = anchor.created_at
+        else:
+            when = parse_datetime(str(start))
+        if when is None:
+            return f"'{start}' is neither a message id nor an ISO time."
+        found = [(m, t) for m, t in found if m.created_at >= when][:limit]
+    else:
+        found = found[-limit:]
+    lines = []
+    for msg, text in found:
+        if len(text) > EACH_CHARS:
+            text = text[:EACH_CHARS] + ' […]'
+        lines.append(f"[{msg.sender_id}, {msg.created_at.isoformat()[:16]}Z, #m-{msg.id}] {text}")
+    dropped = 0
+    while lines and sum(len(l) for l in lines) > READ_MOOD_CHARS:
+        lines.pop(0)
+        dropped += 1
+    head = [f"Mood: {motion.title or motion.slug} ({motion.slug})"]
+    if motion.description:
+        head.append(motion.description)
+    head.append(f"{len(lines)} turns, oldest first" + (f" ({dropped} more before them left out for length)" if dropped else '')
+                + " -- what people and agents said; tool calls aren't shown. Each line's #m-<id> is its link.\n")
+    return '\n'.join(head + lines)
+
+
+async def handle_list_moods(arguments):
+    text = await sync_to_async(with_fresh_connection(list_moods_text))()
+    return [types.TextContent(type="text", text=text)]
+
+
+async def handle_read_mood(arguments):
+    arguments = arguments or {}
+    text = await sync_to_async(with_fresh_connection(
+        lambda: read_mood_text(arguments.get('slug', ''), arguments.get('from'), arguments.get('limit', 60))
+    ))()
+    return [types.TextContent(type="text", text=text)]
+
+
 # Tool registry - maps tool names to handlers
 async def handle_list_threads(arguments):
     """List distinct threads, most recently active first"""
@@ -228,6 +309,8 @@ async def handle_list_threads(arguments):
 
 
 TOOL_HANDLERS = {
+    "list_moods": handle_list_moods,
+    "read_mood": handle_read_mood,
     "list_threads": handle_list_threads,
     "bootstrap_memory": handle_bootstrap_memory,
     "get_latest_continuation": handle_get_latest_continuation,

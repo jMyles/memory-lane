@@ -673,6 +673,65 @@ class WhoseMotionTest(TestCase):
         self.assertEqual((screen.prompts, api.quiets), ([], []))
 
 
+class MentionContextTest(TestCase):
+    """A mention wake reads what was said since the agent last spoke -- all of it, within its budget."""
+
+    LINKED = '0b1c2d3e-0000-4000-8000-00000000000a'
+
+    def make(self, said, owed_text='@magent go ahead with what we decided', settings=None):
+        turns = [turn('m0', 'magent', 0, 'my last word here')] + said
+        owed = dict(turn('ask', 'justin', 100, owed_text), via='web')
+
+        class API(FakeAPI):
+            def recent(inner, slug, limit=40):
+                return {'turns': (turns + [owed])[-limit:]}
+
+            def turns_from(inner, slug, message_id):
+                ids = [t['id'] for t in turns]
+                inner.read_from = message_id
+                inner.read_in = slug
+                return turns[ids.index(message_id):] + [owed] if message_id in ids else []
+        api = API([mention('m26', owed)], sessions={'m26': ['s-local']})
+        state = Path(tempfile.mkdtemp()) / 'state.json'
+        state.write_text(json.dumps({'since': (T0 - timedelta(hours=1)).isoformat(), 'handled': [], 'wakes': []}))
+        waker = FakeWaker()
+        poller = MotionPoller(api, waker, state_path=state, now=lambda: T0 + timedelta(minutes=101), consider=False)
+        poller.settings = {'m26': settings or {}}
+        poller.poll_once()
+        return api, waker.woken[0][1]
+
+    def test_everything_since_its_last_word_and_long_posts_whole(self):
+        said = [turn(f's{i}', 'skyler' if i % 2 else 'justin', 1 + i, f'point {i}: are you sure?') for i in range(40)]
+        said.append(turn('long', 'justin', 60, 'the decision: ' + 'x' * 5000 + ' END'))
+        api, prompt = self.make(said)
+        self.assertIn('What was said here since you last spoke', prompt)
+        self.assertIn('point 0: are you sure?', prompt)  # 40 posts back, not just the last 20
+        self.assertIn(' END', prompt)  # 5,000 characters, whole
+        self.assertNotIn('my last word here', prompt)
+
+    def test_a_linked_message_is_read_from(self):
+        said = [turn(self.LINKED, 'justin', 1, 'Here is the plan we settled on.')] + \
+               [turn(f'c{i}', 'skyler', 2 + i, f'chatter {i}') for i in range(5)]
+        api, prompt = self.make(said, owed_text=f'@magent go, as decided at /motions/m26/#m-{self.LINKED}')
+        self.assertEqual(api.read_from, self.LINKED)
+        self.assertIn('From the message linked', prompt)
+        self.assertIn('Here is the plan we settled on.', prompt)
+
+    def test_a_message_linked_in_another_mood_is_read_there(self):
+        said = [turn(self.LINKED, 'justin', 1, 'What we built today, in the other Mood.')]
+        api, prompt = self.make(said, owed_text=f'@magent read up: https://x/motions/magenta-26-million/#m-{self.LINKED}')
+        self.assertEqual((api.read_in, api.read_from), ('magenta-26-million', self.LINKED))
+        self.assertIn('linked in the Mood "magenta-26-million"', prompt)
+        self.assertIn('What we built today', prompt)
+
+    def test_over_budget_the_older_part_is_said_to_be_left_out(self):
+        said = [turn(f's{i}', 'justin', 1 + i, f'post {i} ' + 'la ' * 400) for i in range(30)]
+        api, prompt = self.make(said, settings={'catch_up_tokens': 2000})
+        self.assertIn('earlier posts not shown here', prompt)  # no screen here to summarize them
+        self.assertIn('post 29', prompt)
+        self.assertNotIn('post 0 ', prompt)
+
+
 class DefaultsTest(TestCase):
 
     def test_eight_turns_at_once_by_default(self):
@@ -1000,7 +1059,7 @@ class SettingsInTheRunnerTest(TestCase):
         self.assertIn('a long deliberation begins', prompt)  # caught up on everything it missed
 
     def test_a_big_backlog_is_digested_and_the_newest_kept_verbatim(self):
-        api = MentionsAndPulse()
+        api = MentionsAndPulse(settings={'catch_up_tokens': 2000})  # about 8 of these posts, word for word
         screen = DigestingScreen('pass')
         poller = self.make(api, screen)
         for i in range(30):
@@ -1135,6 +1194,182 @@ class GlovesOffTest(TestCase):
         for flag in ('--tools', '--strict-mcp-config', '--allowedTools', '--mcp-config'):
             self.assertNotIn(flag, full)
             self.assertIn(flag, limited)
+
+
+class CompactTest(TestCase):
+    """"@magent /compact" from someone trusted compacts the session instead of taking a turn."""
+
+    def run_for(self, *posts):
+        api = FakeAPI([mention('m26', dict(turn(f'm{i}', who, i, text), via='web'))
+                       for i, (who, text) in enumerate(posts)], sessions={'m26': ['s-local']})
+        self.waker = FakeWaker(reply='')
+        state = Path(tempfile.mkdtemp()) / 'state.json'
+        state.write_text(json.dumps({'since': (T0 - timedelta(hours=1)).isoformat(), 'handled': [], 'wakes': []}))
+        self.poller = MotionPoller(api, self.waker, state_path=state, now=lambda: T0 + timedelta(minutes=30))
+        self.poller.poll_once()
+        return [prompt for _, prompt in self.waker.woken]
+
+    def test_the_command_alone_is_what_runs(self):
+        self.assertEqual(self.run_for(('justin', '@magent /compact')), ['/compact'])
+        self.assertNotIn('effort', self.waker.options)
+        # With the tools a turn of theirs would have, so /context counts what a real turn carries.
+        self.assertTrue(self.waker.options['full'])
+
+    def test_the_other_commands_and_what_they_take(self):
+        self.assertEqual(self.run_for(('justin', '@magent /context')), ['/context'])
+        self.assertEqual(self.run_for(('justin', '@magent /usage')), ['/usage'])
+        self.assertEqual(self.run_for(('justin', '@magent /cost')), ['/cost'])
+        # Words after a command that takes none: a question, not the command.
+        self.assertTrue(self.run_for(('justin', '@magent /usage of the word banjo?'))[0].startswith('<motion-wake'))
+        # Not one of ours (unavailable here, a knob already, or throws the session away): an ordinary mention.
+        for line in ('@magent /clear', '@magent /model sonnet', '@magent /rewind'):
+            with self.subTest(line=line):
+                self.assertTrue(self.run_for(('justin', line))[0].startswith('<motion-wake'))
+
+    def test_what_to_keep_goes_with_it(self):
+        self.assertEqual(self.run_for(('justin', '@magent /compact keep the setlist and the open PRs')),
+                         ['/compact keep the setlist and the open PRs'])
+        self.assertEqual(self.run_for(('justin', '/compact @magent')), ['/compact'])
+
+    def test_anything_else_owed_waits_for_the_compacted_session(self):
+        prompts = self.run_for(('justin', '@magent what time is soundcheck?'), ('justin', '@magent /compact'))
+        self.assertEqual(prompts, ['/compact'])
+        self.assertEqual(set(self.poller.state['handled']), {'m1'})  # the question is still owed
+
+    def test_only_from_someone_trusted_with_real_work(self):
+        prompts = self.run_for(('skyler', '@magent /compact'))
+        self.assertTrue(prompts[0].startswith('<motion-wake'))  # just a mention: it can say why not
+
+    def test_a_mention_of_compacting_is_not_the_command(self):
+        prompts = self.run_for(('justin', '@magent should we /compact soon?'))
+        self.assertTrue(prompts[0].startswith('<motion-wake'))
+
+
+class StopAPI(FakeAPI):
+    """A Motion where someone pressed stop at `stopped` (minutes after T0)."""
+
+    def __init__(self, *args, stopped=None, scram=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stopped, self.scram = stopped, scram
+
+    def interrupt(self, slug, agent):
+        at = (T0 + timedelta(minutes=self.stopped)).isoformat() if self.stopped is not None else None
+        return {'scram': self.scram, 'interrupt': at and {'agent': agent, 'by': 'justin', 'at': at}}
+
+
+class StopTest(TestCase):
+    """Stop in the Motion: a mention not yet answered is let go; a turn under way ends."""
+
+    def make(self, api):
+        self.waker = FakeWaker()
+        state = Path(tempfile.mkdtemp()) / 'state.json'
+        state.write_text(json.dumps({'since': (T0 - timedelta(hours=1)).isoformat(), 'handled': [], 'wakes': []}))
+        return MotionPoller(api, self.waker, state_path=state, now=lambda: T0 + timedelta(minutes=30))
+
+    def test_a_mention_stopped_before_it_was_answered_is_let_go(self):
+        api = StopAPI([mention('m26', dict(turn('a', 'justin', 10), via='web'))], sessions={'m26': ['s-local']},
+                      stopped=11)
+        poller = self.make(api)
+        self.assertEqual(poller.poll_once(), [])
+        self.assertEqual(self.waker.woken, [])
+        # Settled: the cursor moves past it, so it's never woken later either.
+        self.assertEqual(poller.state['since'], (T0 + timedelta(minutes=10)).isoformat())
+        self.assertEqual(poller.poll_once(), [])
+
+    def test_what_is_added_after_the_stop_wakes_and_reads_the_rest(self):
+        api = StopAPI([mention('m26', dict(turn('a', 'justin', 10, '@magent fix the'), via='web')),
+                       mention('m26', dict(turn('b', 'justin', 12, '@magent ...banjo page, I meant'), via='web'))],
+                      sessions={'m26': ['s-local']}, stopped=11)
+        self.make(api).poll_once()
+        self.assertEqual(len(self.waker.woken), 1)
+        prompt = self.waker.woken[0][1]
+        self.assertIn('banjo page, I meant', prompt)
+        self.assertNotIn('] @magent fix the', prompt.split('The Motion lately')[0])  # not owed: only context
+
+    def test_a_running_turn_ends_on_a_stop_after_what_woke_it_and_not_before(self):
+        poller = self.make(StopAPI(stopped=11))
+        self.assertTrue(poller.stop_check('m26', (T0 + timedelta(minutes=10)).isoformat())())
+        self.assertFalse(poller.stop_check('m26', (T0 + timedelta(minutes=12)).isoformat())())
+        self.assertFalse(self.make(StopAPI()).stop_check('m26', T0.isoformat())())
+        self.assertTrue(self.make(StopAPI(scram={'by': 'justin'})).stop_check('m26', T0.isoformat())())
+
+    def test_an_older_server_without_stops_still_has_its_az5(self):
+        class Old(FakeAPI):
+            def interrupt(self, slug, agent):
+                raise RuntimeError('404')
+
+            def pulse(self, agent='magent'):
+                return {'scram': {'by': 'justin'}}
+        poller = self.make(Old())
+        self.assertIsNone(poller.stopped_at('m26'))
+        self.assertTrue(poller.stop_check('m26', T0.isoformat())())
+
+    def test_the_turn_is_given_the_check(self):
+        api = StopAPI([mention('m26', dict(turn('a', 'justin', 10), via='web'))], sessions={'m26': ['s-local']})
+        self.make(api).poll_once()
+        self.assertTrue(callable(self.waker.stop))
+        api.stopped = 20
+        self.assertTrue(self.waker.stop())
+
+
+class SinceLastWordTest(TestCase):
+    """A wake reads what was said since the agent last spoke -- or last stayed silent, having read it."""
+
+    def test_a_silence_of_its_own_counts_as_having_read(self):
+        from poller.motion_poller import since_last_word
+        turns = [turn('a', 'magent', 0, 'Done.'), turn('b', 'justin', 5, 'nice'), turn('c', 'skyler', 6, 'agreed'),
+                 turn('d', 'justin', 20, '@magent one more thing')]
+        self.assertEqual([t['id'] for t in since_last_word(turns, 'magent')], ['b', 'c', 'd'])
+        mine = {'sender': 'magent', 'by': '', 'created_at': (T0 + timedelta(minutes=10)).isoformat()}
+        self.assertEqual([t['id'] for t in since_last_word(turns, 'magent', silences=[mine])], ['d'])
+        # The screen's dot is not the agent's: it read nothing.
+        screen = dict(mine, by='screen')
+        self.assertEqual([t['id'] for t in since_last_word(turns, 'magent', silences=[screen])], ['b', 'c', 'd'])
+
+
+class NewMoodTest(TestCase):
+    """A Mood with no session anywhere: a runner answering every Mood starts one, briefed by the letter."""
+
+    def run_for(self, sessions, **kwargs):
+        api = FakeAPI([mention('fresh', dict(turn('a', 'justin', 10, '@magent hello, new place'), via='web'))],
+                      sessions={'fresh': sessions})
+        self.waker = FakeWaker()
+        state = Path(tempfile.mkdtemp()) / 'state.json'
+        state.write_text(json.dumps({'since': (T0 - timedelta(hours=1)).isoformat(), 'handled': [], 'wakes': []}))
+        poller = MotionPoller(api, self.waker, state_path=state, now=lambda: T0 + timedelta(minutes=30), **kwargs)
+        return poller.poll_once()
+
+    def test_its_first_mention_starts_a_session_with_the_letter(self):
+        self.assertEqual(self.run_for([]), ['fresh'])
+        session, prompt = self.waker.woken[0]
+        self.assertIsNone(session)  # nothing to resume: a new one
+        self.assertTrue(prompt.startswith('<new-mood motion="fresh">'))
+        self.assertIn('Dear me,', prompt)  # poller/letter.md, beside the poller
+        self.assertIn('[justin, 2026-09-29T18:10Z] @magent hello, new place', prompt)
+
+    def test_a_moods_own_container_never_starts_one_unless_told(self):
+        self.assertEqual(self.run_for([], motions=['fresh']), [])
+        self.assertEqual(self.waker.woken, [])
+        self.assertEqual(self.run_for([], motions=['fresh'], start_new=True), ['fresh'])
+
+    def test_a_mood_with_a_session_elsewhere_is_left_to_its_runner(self):
+        self.assertEqual(self.run_for(['s-remote']), [])
+        self.assertEqual(self.waker.woken, [])
+
+    def test_the_command_for_a_new_session_resumes_nothing(self):
+        cmd = ClaudeCodeWaker(claude='claude').command(None, 'n-1', 'hi')
+        self.assertNotIn('--resume', cmd)
+        self.assertNotIn('--fork-session', cmd)
+        self.assertEqual(cmd[cmd.index('--session-id') + 1], 'n-1')
+
+    def test_an_archived_mood_gets_no_unprompted_look(self):
+        poller = MotionPoller(FakeAPI(), FakeWaker(), state_path=Path(tempfile.mkdtemp()) / 's.json',
+                              now=lambda: T0)
+        looked = []
+        poller.ours = lambda slug: True
+        poller.consider_motion = lambda m: looked.append(m['slug']) or 'quiet'
+        poller.consider_once({'motions': [{'slug': 'old', 'archived': True}, {'slug': 'live', 'archived': False}]})
+        self.assertEqual(looked, ['live'])
 
 
 class RunCostTest(TestCase):
