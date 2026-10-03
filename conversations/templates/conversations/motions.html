@@ -232,6 +232,21 @@
   #jump button:hover { color: var(--accent); border-color: var(--accent); }
   /* Where a session's context was compacted: one line, its summary on demand. */
   /* Something that happened around the conversation: a server redeployed. */
+  a.permalink { color: inherit; text-decoration: none; }
+  a.permalink:hover time { text-decoration: underline; }
+  a.permalink[data-copied]::after { content: ' link copied'; color: var(--accent); font-size: 11px; }
+  /* An agent's turn: everything it did between a person's words and its last, under one header. */
+  .aturn { margin: 4px 0 4px -10px; border-left: 3px solid transparent; }
+  .aturn:hover { border-left-color: var(--line); }
+  .ahead { display: flex; gap: 6px; align-items: baseline; width: 100%; text-align: left; border: 0; background: none;
+           padding: 6px 10px 2px; font: inherit; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+  .ahead b { color: var(--agent); font-weight: 600; }
+  .ahead .caret { width: 10px; flex: none; }
+  .ahead .preview { display: none; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                    color: var(--ink); font-size: 13.5px; }
+  .aturn.folded .ahead .preview { display: block; }
+  .aturn.folded .abody { display: none; }
+  .abody { padding-left: 10px; }
   /* A statement signed with someone's SSH key. */
   .signed { font-size: 11.5px; color: #2e9e5b; border: 1px solid currentColor; border-radius: 10px; padding: 0 7px;
             cursor: pointer; background: none; font-family: inherit; }
@@ -609,7 +624,7 @@
     el.id = 'm-' + t.id;
     if (forMe.has(t.id)) el.classList.add('for-me');
     const signed = t.attested ? `<button type="button" class="signed" title="Signed with ${esc(t.sender)}'s SSH key: click for the proof">✓ signed</button>` : '';
-    el.innerHTML = `<div class="who"><span class="name">${icon(t.sender, t.is_human)}${esc(t.sender)}</span><time datetime="${t.created_at}">${stamp(t.created_at)}</time>${how(t)}${signed}</div><div class="body">${t.html}</div>`;
+    el.innerHTML = `<div class="who"><span class="name">${icon(t.sender, t.is_human)}${esc(t.sender)}</span><a class="permalink" href="#m-${esc(t.id)}" title="This message's link: click to copy (paste it with an @mention to have an agent read from here)"><time datetime="${t.created_at}">${stamp(t.created_at)}</time></a>${how(t)}${signed}</div><div class="body">${t.html}</div>`;
     if (t.attested) el._proof = t.attested;
     markTurn(el, t.mentions || []);
     return el;
@@ -795,7 +810,7 @@
   function jump(dir, only = '') {
     const top = main.getBoundingClientRect().top;
     const sel = only ? only.split(',').map(c => '#turns .turn' + c.trim()).join(', ') : '#turns .turn';
-    const turns = [...document.querySelectorAll(sel)];
+    const turns = [...document.querySelectorAll(sel)].filter(t => !t.closest('.aturn.folded') || t.closest('.abody') === null);
     const at = t => t.getBoundingClientRect().top - top;
     const target = dir > 0 ? turns.find(t => at(t) > 16) : turns.reverse().find(t => at(t) < -16);
     if (target) main.scrollTo({ top: main.scrollTop + at(target) - 8, behavior: 'smooth' });
@@ -890,11 +905,107 @@
             ...(data.events || []).map(e => ({ kind: 'event', v: e }))]
       .sort((a, b) => a.v.created_at < b.v.created_at ? -1 : a.v.created_at > b.v.created_at ? 1 : 0);
   }
+  // A message's link: /motions/<slug>/#m-<id>. Clicking its time copies it.
+  document.addEventListener('click', async e => {
+    const a = e.target.closest('a.permalink');
+    if (!a) return;
+    e.preventDefault();
+    const url = `${location.origin}/motions/${encodeURIComponent(current)}/${a.getAttribute('href')}`;
+    try { await navigator.clipboard.writeText(url); a.dataset.copied = '1'; setTimeout(() => delete a.dataset.copied, 1500); }
+    catch (err) { history.replaceState(history.state, '', url); }
+  });
+
+  // --- an agent's turn, gathered under one header --------------------------------
+  // Everything an agent did between a person's words and its turn's end -- its
+  // words along the way, its thinking, its steps -- in one block: a header
+  // (who, how long, on what, how many tokens) that folds the rest away.
+  function agentOf(it) {
+    if (it.kind === 'turn') return it.v.is_human ? null : it.v.sender;
+    return it.kind === 'step' || it.kind === 'thought' ? it.v.sender : null;
+  }
+  function kTokens(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1000) return (n < 10000 && n % 1000 ? (n / 1000).toFixed(1) : Math.round(n / 1000)) + 'k';
+    return String(n);
+  }
+  function blockFor(container, agent, v) {
+    const last = container.lastElementChild;
+    if (last && last.classList.contains('aturn') && !last._ended && last._agent === agent) return last;
+    closeBlock(container);  // another agent's turn begins
+    const b = document.createElement('section');
+    b.className = 'aturn';
+    const at = new Date(v.created_at).getTime() / 1000;
+    // From the words that set it going, when they're just before it.
+    const asked = container._askedAt && container._askedAt <= at && at - container._askedAt < 6 * 3600 ? container._askedAt : at;
+    Object.assign(b, { _agent: agent, _start: asked, _end: at, _out: 0, _ctx: 0, _seen: new Set(), _how: {}, _ended: false, _final: '' });
+    b.innerHTML = '<button type="button" class="ahead"></button><div class="abody"></div>';
+    container.appendChild(b);
+    return b;
+  }
+  function tally(b, v) {
+    b._end = Math.max(b._end, new Date(v.created_at).getTime() / 1000);
+    if (v.out != null) {
+      const usage = v.out + ':' + v.ctx;  // one response stored as several rows carries one usage
+      if (!b._seen.has(usage)) { b._seen.add(usage); b._out += v.out; }
+      if (v.ctx) b._ctx = v.ctx;
+    }
+    if (v.model) b._how.model = v.model;
+    if (v.effort) b._how.effort = v.effort;
+  }
+  function drawBlockHead(b) {
+    const took = Math.max(0, Math.round(b._end - b._start));
+    const how = [b._how.model, b._how.effort].filter(Boolean).join(' · ');
+    const tokens = b._out || b._ctx ? `${kTokens(b._out)} out · ${kTokens(b._ctx)} context` : '';
+    b.querySelector('.ahead').innerHTML = `<span class="caret">${b.classList.contains('folded') ? '▸' : '▾'}</span>`
+      + `${icon(b._agent, false)}<b>${esc(b._agent)}</b>`
+      + [took ? elapsed(Date.now() / 1000 - took) : '', how, tokens].filter(Boolean).map(x => ' · ' + esc(x)).join('')
+      + (!b._ended && isWorking(b) ? ' · working…' : '')
+      + `<span class="preview">${esc(b._final)}</span>`;
+  }
+  // Working only if it's the newest thing here and the agent is at work now.
+  function isWorking(b) {
+    return b.parentNode && b.parentNode.lastElementChild === b && act && act.agent === b._agent && act.doing !== 'held';
+  }
+  // A turn that a person spoke after is over, whether or not its end was marked.
+  function closeBlock(container) {
+    const last = container.lastElementChild;
+    if (last && last.classList.contains('aturn') && !last._ended) { last._ended = true; drawBlockHead(last); }
+  }
+
+  function foldOld(container, keepNewest = true) {
+    // Older finished turns fold away; the newest stays open.
+    const blocks = [...container.querySelectorAll(':scope > .aturn')];
+    (keepNewest ? blocks.slice(0, -1) : blocks).forEach(b => { if (b._ended && !b.classList.contains('folded')) { b.classList.add('folded'); drawBlockHead(b); } });
+  }
+  document.addEventListener('click', e => {
+    const head = e.target.closest('.ahead');
+    if (!head) return;
+    const b = head.closest('.aturn');
+    b.classList.toggle('folded');
+    drawBlockHead(b);
+  });
+
   function renderItems(items, container, isNew) {
     for (const it of items) {
-      if (it.kind === 'turn') container.appendChild(turnEl(it.v, isNew));
+      const agent = agentOf(it);
+      if (agent) {
+        const b = blockFor(container, agent, it.v);
+        const body = b.querySelector('.abody');
+        if (it.kind === 'turn') {
+          body.appendChild(turnEl(it.v, isNew));
+          if (it.v.stop === 'end_turn') { b._ended = true; b._final = (it.v.text || '').split('\n')[0].slice(0, 200); }
+        } else if (it.kind === 'thought') addThought(it.v, body);
+        else addStep(it.v, body);
+        tally(b, it.v);
+        drawBlockHead(b);
+        continue;
+      }
+      closeBlock(container);
+      if (it.kind === 'turn') {
+        container.appendChild(turnEl(it.v, isNew));
+        container._askedAt = new Date(it.v.created_at).getTime() / 1000;
+      }
       else if (it.kind === 'quiet') addQuiet(it.v, container);
-      else if (it.kind === 'thought') addThought(it.v, container);
       else if (it.kind === 'compaction') addCompaction(it.v, container);
       else if (it.kind === 'event') addEvent(it.v, container);
       else addStep(it.v, container);
@@ -1137,6 +1248,8 @@
     for (let i = 0; i < 12; i++) {
       const el = document.getElementById('m-' + id);
       if (el) {
+        const folded = el.closest('.aturn.folded');
+        if (folded) { folded.classList.remove('folded'); drawBlockHead(folded); }
         el.scrollIntoView({ block: 'center' });
         el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
         return true;
@@ -1221,6 +1334,7 @@
       const box = document.createElement('div');
       const saved = prev; prev = null;
       renderItems(items, box, false);
+      foldOld(box, false);  // an earlier page: all of it is old
       prev = saved;
       const turnsEl = document.getElementById('turns');
       const height = main.scrollHeight;
@@ -1284,6 +1398,7 @@
       const nearBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
       const emptyNote = turnsEl.querySelector('.empty'); if (emptyNote) emptyNote.remove();
       renderItems(items, turnsEl, !full);
+      if (full) foldOld(turnsEl);
       lastId = items[items.length - 1].v.id;
       if (full || nearBottom) main.scrollTop = main.scrollHeight;
       else if (!full) { newBelow += data.turns.length; }
@@ -1331,6 +1446,7 @@
   const MODELS = [['', 'default model'], ['opus', 'opus'], ['sonnet', 'sonnet'], ['fable', 'fable'], ['haiku', 'haiku']];
   const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
   const EFFORT_LABELS = { xhigh: 'extra' };  // as the terminal names them
+  const READS = [2500, 5000, 10000, 20000];  // tokens a wake reads word for word (catch_up_tokens)
   let agentsNow = {}, agentsShown = '';
   function describeListening(l) {
     const until = l.until ? ' until ' + new Date(l.until).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
@@ -1363,7 +1479,7 @@
     agentsNow = agents;
     const box = document.getElementById('hush');
     // Redraw the menus only when a setting changed: never under someone's open menu.
-    const key = JSON.stringify(Object.entries(agents).map(([n, a]) => [n, a.listening, a.model, a.effort, a.ultracode, viewer]));
+    const key = JSON.stringify(Object.entries(agents).map(([n, a]) => [n, a.listening, a.model, a.effort, a.ultracode, a.reads, viewer]));
     if (box && (key !== agentsShown || !box.childElementCount)) {
       agentsShown = key;
       box.innerHTML = agentRows(agents);
@@ -1376,7 +1492,7 @@
       const row = `<span class="agent${l.mode === 'on' ? '' : ' off'}" data-who="${esc(agent)}">${icon(agent, false)}${esc(agent)}: `;
       if (!viewer) {
         return row
-          + `${esc(describeListening(l))} · ${esc(a.model || 'default model')} · effort ${esc(EFFORT_LABELS[a.effort] || a.effort)}`
+          + `${esc(describeListening(l))} · ${esc(a.model || 'default model')} · effort ${esc(EFFORT_LABELS[a.effort] || a.effort)} · reads ${esc(kTokens(a.reads || 10000))}`
           + (a.ultracode ? ' · ultracode' : '') + '</span>';
       }
       const listen = `<select data-agent="${esc(agent)}" data-knob="listening"><option selected disabled>${esc(describeListening(l))}</option>`
@@ -1387,9 +1503,13 @@
           + `${esc(v ? label : (ctx.model ? `default (${shortModel(ctx.model)})` : label))}</option>`).join('') + '</select>';
       const effort = `<select data-agent="${esc(agent)}" data-knob="mention_effort" title="how hard it thinks when @mentioned here">`
         + EFFORTS.map(v => `<option value="${v}"${v === a.effort ? ' selected' : ''}>effort ${EFFORT_LABELS[v] || v}</option>`).join('') + '</select>';
+      // How much of what was said since its last word a wake reads word for word.
+      const reads = `<select data-agent="${esc(agent)}" data-knob="catch_up_tokens" title="How much of what was said here since it last spoke a wake reads word for word; older is summarized">`
+        + READS.map(n => `<option value="${n}"${n === a.reads ? ' selected' : ''}>reads ${kTokens(n)}</option>`).join('')
+        + (READS.includes(a.reads) ? '' : `<option value="${a.reads}" selected>reads ${kTokens(a.reads)}</option>`) + '</select>';
       const ultra = `<label class="ultra" title="Claude Code's standing multi-agent workflows, on wakes with full tools: thorough, and costly">`
         + `<input type="checkbox" data-agent="${esc(agent)}" data-knob="ultracode"${a.ultracode ? ' checked' : ''}> ultracode</label>`;
-      return `${row}${listen} ${model} ${effort} ${ultra}</span>`;
+      return `${row}${listen} ${model} ${effort} ${reads} ${ultra}</span>`;
     }).join('');
   }
   document.addEventListener('change', async e => {
@@ -1442,6 +1562,9 @@
   }
 
   function renderActivity() {
+    const turnsEl = document.getElementById('turns');
+    const newest = turnsEl && turnsEl.lastElementChild;
+    if (newest && newest.classList.contains('aturn')) drawBlockHead(newest);
     document.querySelectorAll('.people .who').forEach(el => el.classList.toggle('busy', !!act && act.doing !== 'held' && el.dataset.who === act.agent));
     activityEl.classList.toggle('on', !!act);
     activityEl.classList.toggle('held', !!act && act.doing === 'held');

@@ -116,12 +116,15 @@ class StreamTest(TestCase):
                            'sessionId': self.session, 'timestamp': '2026-10-01T23:00:01.000Z',
                            'userType': 'external', 'isSidechain': False, 'cwd': '/home/magent/workspace',
                            'gitBranch': 'main', 'effort': 'high', 'perTurnEffort': 'xhigh',
-                           'message': reply['message'] | {'stop_reason': 'end_turn'}})
+                           'message': reply['message'] | {'stop_reason': 'end_turn',
+                                                          'usage': {'input_tokens': 3, 'output_tokens': 322}}})
+        self.assertEqual(Message.objects.get(id=reply['uuid']).output_tokens, 40)  # the stream's, mid-response
         import_lines([line], source='hunter-watcher', username='justin')
         self.assertEqual(Message.objects.count(), count)
         stored = Message.objects.get(id=reply['uuid'])
         self.assertEqual((stored.effort, stored.cwd, str(stored.parent_id)), ('xhigh', '/home/magent/workspace',
                                                                           result['uuid']))
+        self.assertEqual(stored.output_tokens, 322)  # the response's final count
 
     def test_what_streams_in_is_redacted_and_its_images_kept(self):
         s = self.session

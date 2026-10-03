@@ -114,6 +114,10 @@ class MotionAPI:
         """A Motion's newest turns (and its title and description), for context."""
         return self._get(f'/api/motions/{slug}/turns/', limit=limit)
 
+    def turns_from(self, slug, message_id):
+        """That message's turn and every turn since (a post linked it, to be read from)."""
+        return self._get(f'/api/motions/{slug}/turns/', **{'from': message_id})['turns']
+
     def quiet(self, slug, reason, by='screen'):
         """Record a moment let pass for the agent, as a dot marked whose it was."""
         if not self.key:
@@ -579,18 +583,19 @@ def wake_frames(slug, rules='', agent='magent', trusted='the people its runner t
     """Every kind of wake, as the agent receives it, with its content shown as
     placeholders. What memory-lane's rules page shows."""
     posts = '[the posts that woke it, each as "[name, time] text"]'
-    context = '[up to 20 recent turns around them]'
+    context = ('[everything said here since it last spoke, word for word up to its catch_up_tokens; older, summarized. '
+               'A post that links a message (#m-<id>) has it read from that message instead]')
     recent = '[the recent turns, newest last; ► marks the new ones]'
     return [
         {'kind': 'mention-full', 'title': 'When someone @mentions it: full tools',
          'when': f'Every post that woke it is from someone trusted with real work here ({trusted}).',
          'text': '\n'.join(mention_opening(slug, 'this was posted from the web, where no session is listening.')
-                           + [posts, '', 'The Motion lately, for context (newest last):', context]
+                           + [posts, '', 'What was said here since you last spoke (newest last):', context]
                            + rules_block(rules) + wake_footer(full=True))},
         {'kind': 'mention-look', 'title': 'When someone @mentions it: look, not touch',
          'when': 'Any post that woke it is from someone else.',
          'text': '\n'.join(mention_opening(slug, 'this was posted from the web, where no session is listening.')
-                           + [posts, '', 'The Motion lately, for context (newest last):', context]
+                           + [posts, '', 'What was said here since you last spoke (newest last):', context]
                            + rules_block(rules) + wake_footer(full=False))},
         {'kind': 'consider', 'title': 'When people talk and nobody asks it',
          'when': 'New posts from the web, after a quiet moment, if the screen lets them through.',
@@ -619,13 +624,41 @@ def transcript_of(turns, new_ids=(), limit=20_000, each=1500):
     return lines
 
 
+# A link to a message in a Motion -- /motions/<slug>/#m-<uuid>, or just
+# #m-<uuid> -- in a post that wakes the agent: read from there.
+_MESSAGE_LINK = re.compile(r'#m-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})')
+CHARS_PER_TOKEN = 4
+EACH_MAX = 8000  # characters of any one message read word for word
+
+
+def linked_message(posts):
+    """The first message a post links to read from, or None."""
+    for post in posts:
+        match = _MESSAGE_LINK.search(post.get('text', ''))
+        if match:
+            return match.group(1)
+    return None
+
+
+def since_last_word(turns, agent, before_id=None):
+    """The turns after `agent` last spoke, up to (not including) `before_id`; turns oldest first."""
+    if before_id is not None:
+        ids = [t['id'] for t in turns]
+        if before_id in ids:
+            turns = turns[:ids.index(before_id)]
+    for i in range(len(turns) - 1, -1, -1):
+        if turns[i]['sender'] == agent:
+            return turns[i + 1:]
+    return turns
+
+
 class MotionPoller:
 
     def __init__(self, api, waker, agent='magent', state_path=None, grace=600,
                  max_wakes_per_hour=30, dry_run=False, now=None, streamer=None, mention_effort='high',
                  screen=None, consider=True, considers_per_hour=6, consider_usd_per_day=10.0,
                  consider_budget=3.0, consider_effort='medium', debounce=10, idle_first=3000,
-                 full_tools_for=('justin',), parallel=0, motions=None):
+                 full_tools_for=('justin',), parallel=0, motions=None, catch_up_tokens=10_000):
         self.api = api
         self.waker = waker
         self.agent = agent.lower()
@@ -645,6 +678,9 @@ class MotionPoller:
         # unprompted look, can look but not touch. Widen it once docker.sock
         # is out of hunter's containers and Motions have their own workspaces.
         self.full_tools_for = tuple(full_tools_for or ())
+        # How much of what was said since its last word a wake reads word for
+        # word, in tokens, unless the Motion's settings say otherwise.
+        self.catch_up_tokens = catch_up_tokens
         # Only these Motions, if given: a Motion's own container answers
         # only that Motion (its sessions live there and nowhere else).
         self.motions = set(motions) if motions else None
@@ -959,17 +995,63 @@ class MotionPoller:
                 entry = entry[:max(budget, 0)] + ' [cut: too long to pass on]'
             budget -= len(entry)
             lines.append(entry)
-        # What else was said around it: a web post can follow a conversation
-        # this session never saw. (Also why the consider loop needn't look at
-        # the same posts again.)
+        # What was said here since the agent last spoke: web posts reach no
+        # session, so this is the only way it hears them -- all of it, within
+        # its budget, the older part summarized when it doesn't fit. A post
+        # that links a message has it read from there instead.
+        owed_ids = {t['id'] for t in owed}
+        linked = linked_message(owed)
         try:
-            owed_ids = {t['id'] for t in owed}
-            around = [t for t in self.api.recent(slug, limit=20)['turns'] if t['id'] not in owed_ids]
+            if linked:
+                said = [t for t in self.api.turns_from(slug, linked) if t['id'] not in owed_ids]
+                note = 'From the message linked, as it was said (newest last):'
+            else:
+                recent = self.api.recent(slug, limit=400)['turns']
+                said = since_last_word(recent, self.agent, before_id=owed[0]['id'])
+                said = [t for t in said if t['id'] not in owed_ids]
+                note = 'What was said here since you last spoke (newest last):'
+                if not said:  # it spoke just before: a little of what led here, for orientation
+                    said = [t for t in recent if t['id'] not in owed_ids][-6:]
+                    note = 'The Motion lately, for context (newest last):'
         except Exception:
-            around = []
-        if around:
-            lines += ['', 'The Motion lately, for context (newest last):', *transcript_of(around, limit=12_000, each=800)]
+            said = []
+        if said:
+            room = min(self.catch_up_chars(slug), max(MAX_PROMPT_CHARS - sum(len(l) for l in lines) - 8000, 4000))
+            window, cost = self.fit(said, room)
+            self.spend(cost)
+            lines += ['', note, *window]
         return '\n'.join(lines + self.rules_lines(slug) + wake_footer(full))
+
+    def catch_up_chars(self, slug):
+        """How much a wake reads word for word here, in characters (the knob is in tokens)."""
+        tokens = self.knob(slug, 'catch_up_tokens', self.catch_up_tokens)
+        try:
+            return int(tokens) * CHARS_PER_TOKEN
+        except (TypeError, ValueError):
+            return self.catch_up_tokens * CHARS_PER_TOKEN
+
+    def fit(self, turns, room, new_ids=()):
+        """(lines, cost): the newest turns word for word within `room` characters,
+        any one up to EACH_MAX; the older ones that don't fit, summarized."""
+        kept, size = [], 0
+        for turn in reversed(turns):
+            n = min(len(turn.get('text', '')), EACH_MAX) + 40
+            if kept and size + n > room:
+                break
+            kept.insert(0, turn)
+            size += n
+        older = turns[:len(turns) - len(kept)]
+        lines, cost = [], 0.0
+        if older:
+            if self.screen:
+                summary, cost = self.screen.digest('\n'.join(transcript_of(older, limit=60_000, each=2000)))
+                lines += [f'While you were away, {len(older)} earlier posts, in short:',
+                          summary or '(the summary failed; the posts are in the Motion if you need them)', '',
+                          'The newest, as they were posted:']
+            else:
+                lines += [f'[{len(older)} earlier posts not shown here; the Motion has them]']
+        lines += transcript_of(kept, set(new_ids), limit=room + 10_000, each=EACH_MAX)
+        return lines, cost
 
     def rules_lines(self, slug):
         return rules_block(self.knob(slug, 'rules'))
@@ -1008,8 +1090,6 @@ class MotionPoller:
     # a day across screens and considerations (mentions aren't counted).
 
     IDLE_REST = timedelta(hours=12)
-    DIGEST_OVER = 12_000  # characters of new posts beyond which the older ones are summarized
-    DIGEST_KEEP = 8       # the newest posts always go verbatim
 
     def consider_once(self, pulse=None):
         """One look at every Motion; [(slug, outcome)] for those considered."""
@@ -1114,19 +1194,18 @@ class MotionPoller:
         return outcome
 
     def catch_up(self, slug, recent, posts):
-        """Prompt lines for what's new: verbatim if it's short; if not, a digest of
-        the older part and the newest verbatim. Returns (lines, cost)."""
+        """Prompt lines for what's new (marked ►) and what led to it: what was said
+        since the agent last spoke here, within its budget, the older part
+        summarized when it doesn't fit. Returns (lines, cost)."""
         new_ids = {t['id'] for t in posts}
-        size = sum(len(t.get('text', '')) for t in posts)
-        if size <= self.DIGEST_OVER or len(posts) <= self.DIGEST_KEEP or not self.screen:
-            context = [t for t in recent['turns'] if parse_time(t['created_at']) <= parse_time(posts[-1]['created_at'])]
-            return transcript_of(context[-(len(posts) + 15):], new_ids), 0.0
-        older, newer = posts[:-self.DIGEST_KEEP], posts[-self.DIGEST_KEEP:]
-        summary, cost = self.screen.digest('\n'.join(transcript_of(older, limit=60_000, each=2000)))
-        lines = [f'While you were away, {len(older)} earlier posts, in short:',
-                 summary or '(the summary failed; the posts are in the Motion if you need them)', '',
-                 'The newest, as they were posted:', *transcript_of(newer, {t['id'] for t in newer})]
-        return lines, cost
+        upto = parse_time(posts[-1]['created_at'])
+        context = [t for t in recent['turns'] if parse_time(t['created_at']) <= upto]
+        said = since_last_word(context, self.agent)
+        if not any(t['id'] in new_ids for t in said):  # its last word came after them: just the new
+            said = [t for t in context if t['id'] in new_ids]
+        # A little of what led here, when it spoke just before.
+        lead = [t for t in context[:len(context) - len(said)] if t['id'] not in new_ids][-4:]
+        return self.fit(lead + said, self.catch_up_chars(slug), new_ids)
 
     def consider_posts(self, slug, recent, posts):
         if not self.within_budget(slug):

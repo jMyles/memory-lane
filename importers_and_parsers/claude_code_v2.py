@@ -132,10 +132,21 @@ ENRICHABLE = ('model_backend', 'effort', 'input_tokens', 'output_tokens', 'cache
               'cache_read_input_tokens', 'cwd', 'git_branch', 'client_version', 'stop_reason')
 
 
+# Token counts a streamed row holds are the stream's, from when each block
+# was sent (an output_tokens of 5, say); the transcript's line for the same
+# message, imported later, has the response's final counts. They only grow.
+USAGE_FIELDS = ('output_tokens',)
+
+
 def enrich(message, fields):
-    """Fill the fields a stored row lacks from a later line about it."""
+    """Fill the fields a stored row lacks from a later line about it; raise its
+    token counts to the final ones."""
     updates = {k: v for k, v in fields.items()
                if k in ENRICHABLE and v is not None and getattr(message, k, None) is None}
+    for k in USAGE_FIELDS:
+        v = fields.get(k)
+        if isinstance(v, int) and v > (getattr(message, k, None) or 0):
+            updates[k] = v
     if updates:
         type(message).objects.filter(pk=message.pk).update(**updates)
         for k, v in updates.items():

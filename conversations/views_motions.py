@@ -17,7 +17,7 @@ from django.views.decorators.http import require_GET, require_POST
 from .models import Message, Motion, ThinkingEntity
 from .services import motion_auth
 from .services.motion_view import (
-    MACHINERY_SENDERS, activity, background_tasks, is_wrapper, known_names, mentions_in, motion_payload,
+    MACHINERY_SENDERS, how_payload, activity, background_tasks, is_wrapper, known_names, mentions_in, motion_payload,
     prose, render_html, step_detail, step_images, step_payload, timeline, turn_payload, turns, wiki_title, wikilinks_in,
 )
 
@@ -64,19 +64,22 @@ def api_motion_turns(request, slug):
         after = _message_or_none(request.GET['after'])
     if request.GET.get('before'):
         before = _message_or_none(request.GET['before'])
+    # ?from=<id>: that message and everything since -- what a runner reads
+    # when a post links a message to read from.
+    start = _message_or_none(request.GET['from']) if request.GET.get('from') else None
     # A first load, or a page back, is the newest PAGE items; a poll is
     # everything since.
-    limit = None if after is not None else PAGE
+    limit = None if after is not None or start is not None else PAGE
     if request.GET.get('limit', '').isdigit():  # e.g. the runner wanting recent context only
         limit = max(1, min(int(request.GET['limit']), PAGE))
 
     names = known_names()
     turns_out, step_msgs, quiet_out, thoughts_out, compactions_out, events_out = [], [], [], [], [], []
-    for kind, msg, text in timeline(motion, after=after, before=before, limit=limit):
+    for kind, msg, text in timeline(motion, after=after, before=before, limit=limit, start=start):
         if kind == 'turn':
             turns_out.append(turn_payload(msg, text, names))
         elif kind == 'thought':
-            thoughts_out.append({'id': str(msg.id), 'sender': msg.sender_id,
+            thoughts_out.append({**how_payload(msg), 'id': str(msg.id), 'sender': msg.sender_id,
                                  'created_at': msg.created_at.isoformat(), 'text': text})
         elif kind == 'event':
             events_out.append({'id': str(msg.id), 'created_at': msg.created_at.isoformat(),
@@ -135,6 +138,7 @@ def agents_in(motion):
         resolved = knobs.resolve(motion.slug, name)
         out[name] = {'listening': resolved['listening'], 'model': resolved['model'],
                      'effort': resolved['mention_effort'], 'ultracode': bool(resolved['ultracode']),
+                     'reads': resolved['catch_up_tokens'],
                      'context': context_in(motion, name)}
     return out
 

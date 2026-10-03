@@ -36,6 +36,9 @@ KNOBS = {
     'consider_effort': ('medium', 'How hard it thinks when it decides whether to speak up.'),
     'model': ('', "Which model it runs on here: 'opus', 'sonnet', 'fable', 'haiku', or a full name. "
                   "Empty: its harness's default."),
+    'catch_up_tokens': (10_000, "How much of what was said here since it last spoke a wake reads word for word, "
+                                "in tokens (about 4 characters each); what's older is summarized. A post that links "
+                                "a message has it read from that message on."),
     'rules': ('', 'How it should carry itself here, in a few lines. It reads this at every wake.'),
     'ultracode': (False, "Its full-tools mention wakes here run with Claude Code's ultracode on: standing "
                          "multi-agent workflows, at any effort. Thorough, and costly."),
@@ -71,8 +74,9 @@ def clean(key, value):
                 parsed = parsed.replace(tzinfo=timezone.utc)
             until = parsed.isoformat()
         return {'mode': value['mode'], 'until': until or None}
-    if key in ('consider_after', 'idle_after', 'considers_per_hour'):
-        limits = {'consider_after': (0, 3600), 'idle_after': (0, 7 * 86400), 'considers_per_hour': (0, 60)}[key]
+    if key in ('consider_after', 'idle_after', 'considers_per_hour', 'catch_up_tokens'):
+        limits = {'consider_after': (0, 3600), 'idle_after': (0, 7 * 86400), 'considers_per_hour': (0, 60),
+                  'catch_up_tokens': (1000, 24000)}[key]
         try:
             value = int(value)
         except (TypeError, ValueError):

@@ -375,7 +375,7 @@ def render_html(text, mentionable=()):
     return out
 
 
-def timeline(motion, after=None, before=None, limit=None):
+def timeline(motion, after=None, before=None, limit=None, start=None):
     """Readable turns and the agent's tool steps, oldest first.
 
     Yields ('turn', message, text), ('quiet', message, reason) for an
@@ -384,7 +384,8 @@ def timeline(motion, after=None, before=None, limit=None):
     compacted, and ('step', message, None). A step is
     one tool call; its result is fetched on demand (step_detail), so the
     thread stays light. `limit` keeps the newest that many items -- a first
-    load, or a page further back with `before`.
+    load, or a page further back with `before`. `start` includes that message
+    and everything after it (a runner reading from a linked message).
     """
     from conversations.models import ThinkingEntity
 
@@ -392,6 +393,8 @@ def timeline(motion, after=None, before=None, limit=None):
     rows = motion.messages.filter(is_sidechain=False).select_related('sender', 'tooluse', 'thought')
     if after is not None:
         rows = rows.filter(created_at__gt=after.created_at)
+    if start is not None:
+        rows = rows.filter(created_at__gte=start.created_at)
     if before is not None:
         rows = rows.filter(created_at__lt=before.created_at)
 
@@ -508,8 +511,20 @@ def model_label(model):
 
 
 def how_payload(msg):
-    """Model and effort an agent's message ran on ('' when unknown)."""
-    return {'model': model_label(msg.model_backend), 'effort': msg.effort or ''}
+    """Model and effort an agent's message ran on ('' when unknown); what it
+    wrote and read, in tokens; and whether it ended its turn.
+
+    One response the model gives can be stored as several rows (its thinking,
+    its words, a tool call), each with that response's usage: the page counts
+    a repeat of the same usage once."""
+    out = {'model': model_label(msg.model_backend), 'effort': msg.effort or ''}
+    if msg.output_tokens is not None or msg.input_tokens is not None:
+        out['out'] = msg.output_tokens or 0
+        out['ctx'] = sum(n or 0 for n in (msg.input_tokens, msg.cache_read_input_tokens,
+                                          msg.cache_creation_input_tokens))
+    if msg.stop_reason:
+        out['stop'] = msg.stop_reason
+    return out
 
 
 def attestation_of(msg):
@@ -776,13 +791,16 @@ def models_q(**kwargs):
 
 def motion_payload(motion):
     from django.db.models import Max
-    last = motion.messages.aggregate(last=Max('created_at'))['last']
+    # What was said, not the system's own rows (a redeploy announced in every
+    # Mood, a rename, a turn's tally): those mustn't make a Mood look active.
+    said = motion.messages.exclude(sender_id='system')
+    last = said.aggregate(last=Max('created_at'))['last']
     return {
         'slug': motion.slug,
         'title': motion.title or motion.slug,
         'description': motion.description,
         'eth_blockheight': motion.eth_blockheight,
-        'message_count': motion.messages.count(),
+        'message_count': said.count(),
         'last_at': last.isoformat() if last else None,
         'participants': sorted(e.name for e in motion.thinking_entities()),
     }

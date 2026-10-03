@@ -147,6 +147,12 @@ class ServersTest(TestCase):
         recent = self.client.get('/api/motions/recent/').json()['events']
         self.assertEqual([e['kind'] for e in recent].count('deploy'), 1)
 
+    def test_a_redeploy_doesnt_make_a_mood_look_active(self):
+        before = {m['slug']: (m['last_at'], m['message_count']) for m in self.client.get('/api/motions/').json()['motions']}
+        self.deploy({'server': 'maybelle', 'state': 'finished'})
+        after = {m['slug']: (m['last_at'], m['message_count']) for m in self.client.get('/api/motions/').json()['motions']}
+        self.assertEqual(before, after)
+
     def test_without_a_key_nobody_tells_of_redeploys(self):
         with override_settings(MOTION_DEPLOY_KEY=''):
             self.assertEqual(self.deploy({'server': 'hunter', 'state': 'started'}).status_code, 503)

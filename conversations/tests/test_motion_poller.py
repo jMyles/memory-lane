@@ -673,6 +673,57 @@ class WhoseMotionTest(TestCase):
         self.assertEqual((screen.prompts, api.quiets), ([], []))
 
 
+class MentionContextTest(TestCase):
+    """A mention wake reads what was said since the agent last spoke -- all of it, within its budget."""
+
+    LINKED = '0b1c2d3e-0000-4000-8000-00000000000a'
+
+    def make(self, said, owed_text='@magent go ahead with what we decided', settings=None):
+        turns = [turn('m0', 'magent', 0, 'my last word here')] + said
+        owed = dict(turn('ask', 'justin', 100, owed_text), via='web')
+
+        class API(FakeAPI):
+            def recent(inner, slug, limit=40):
+                return {'turns': (turns + [owed])[-limit:]}
+
+            def turns_from(inner, slug, message_id):
+                ids = [t['id'] for t in turns]
+                inner.read_from = message_id
+                return turns[ids.index(message_id):] + [owed] if message_id in ids else []
+        api = API([mention('m26', owed)], sessions={'m26': ['s-local']})
+        state = Path(tempfile.mkdtemp()) / 'state.json'
+        state.write_text(json.dumps({'since': (T0 - timedelta(hours=1)).isoformat(), 'handled': [], 'wakes': []}))
+        waker = FakeWaker()
+        poller = MotionPoller(api, waker, state_path=state, now=lambda: T0 + timedelta(minutes=101), consider=False)
+        poller.settings = {'m26': settings or {}}
+        poller.poll_once()
+        return api, waker.woken[0][1]
+
+    def test_everything_since_its_last_word_and_long_posts_whole(self):
+        said = [turn(f's{i}', 'skyler' if i % 2 else 'justin', 1 + i, f'point {i}: are you sure?') for i in range(40)]
+        said.append(turn('long', 'justin', 60, 'the decision: ' + 'x' * 5000 + ' END'))
+        api, prompt = self.make(said)
+        self.assertIn('What was said here since you last spoke', prompt)
+        self.assertIn('point 0: are you sure?', prompt)  # 40 posts back, not just the last 20
+        self.assertIn(' END', prompt)  # 5,000 characters, whole
+        self.assertNotIn('my last word here', prompt)
+
+    def test_a_linked_message_is_read_from(self):
+        said = [turn(self.LINKED, 'justin', 1, 'Here is the plan we settled on.')] + \
+               [turn(f'c{i}', 'skyler', 2 + i, f'chatter {i}') for i in range(5)]
+        api, prompt = self.make(said, owed_text=f'@magent go, as decided at /motions/m26/#m-{self.LINKED}')
+        self.assertEqual(api.read_from, self.LINKED)
+        self.assertIn('From the message linked', prompt)
+        self.assertIn('Here is the plan we settled on.', prompt)
+
+    def test_over_budget_the_older_part_is_said_to_be_left_out(self):
+        said = [turn(f's{i}', 'justin', 1 + i, f'post {i} ' + 'la ' * 400) for i in range(30)]
+        api, prompt = self.make(said, settings={'catch_up_tokens': 2000})
+        self.assertIn('earlier posts not shown here', prompt)  # no screen here to summarize them
+        self.assertIn('post 29', prompt)
+        self.assertNotIn('post 0 ', prompt)
+
+
 class DefaultsTest(TestCase):
 
     def test_eight_turns_at_once_by_default(self):
@@ -1000,7 +1051,7 @@ class SettingsInTheRunnerTest(TestCase):
         self.assertIn('a long deliberation begins', prompt)  # caught up on everything it missed
 
     def test_a_big_backlog_is_digested_and_the_newest_kept_verbatim(self):
-        api = MentionsAndPulse()
+        api = MentionsAndPulse(settings={'catch_up_tokens': 2000})  # about 8 of these posts, word for word
         screen = DigestingScreen('pass')
         poller = self.make(api, screen)
         for i in range(30):
